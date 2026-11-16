@@ -1,24 +1,13 @@
-#!/usr/bin/env python3
-"""ai-excited-01 entry (v2 build): "Phoenix Ascendant".
+"""Koi Ascendant -- a deterministic generative artwork in pure Python.
 
-A pure-Python, standard-library-only program that paints one image and
-writes it to entry.png in the output directory (/output in the grader's
-container, or $MAKEFUN_OUTPUT_DIR when that variable is set).
+Two luminous koi carp spiral upward through deep indigo water toward a
+bright moon-disc, trailing bubbles and a stream of glowing motes.  The
+picture is drawn entirely with the Python standard library: a fixed-seed
+splitmix64 PRNG, integer-hash value noise, analytic distance fields and
+a hand-rolled PNG encoder, so two runs always produce the same bytes.
 
-The picture: a great firebird smashing upward through a shattered golden
-sun-ring, over a deep indigo storm-vortex. Wings thrown up in a V, a
-white-hot heart in its chest, tail streamers and ember trails raking down
-the diagonal, golden shards of the broken ring bursting toward the viewer.
-It is composed against the judge's rubric in order — excitement (a blazing
-bird detonating out of a dark vortex), surprise (a phoenix through a
-sun-ring, not a stock fireball), momentum (diagonal ember streams, speed
-streaks, swept feathers), craft (gradient feathers with rim light, an
-eroded per-pixel ring, deterministic value-noise nebula), and a silhouette
-that still reads when shrunk to a thumbnail.
-
-Every value comes from fixed constants and integer/float math: no clock,
-no network, no file reads, no randomness beyond a fixed-seed LCG. Two
-runs produce a byte-identical PNG.
+Running this file writes ``entry.png`` into ``/output`` (or into the
+directory named by the ``MAKEFUN_OUTPUT_DIR`` environment variable).
 """
 
 import math
@@ -30,868 +19,890 @@ from array import array
 W = 1024
 H = 1024
 
-# ---------------------------------------------------------------------------
-# Deterministic helpers
-# ---------------------------------------------------------------------------
+MOON_X = 512.0
+MOON_Y = 205.0
+MOON_R = 118.0
 
 
-def ihash(x, y):
-    """Integer lattice hash -> float in [0, 1). Stable on any platform."""
-    h = (x * 374761393 + y * 668265263) & 0xFFFFFFFF
-    h = (h ^ (h >> 13)) & 0xFFFFFFFF
-    h = (h * 1274126177) & 0xFFFFFFFF
-    h = (h ^ (h >> 16)) & 0xFFFFFFFF
-    return h / 4294967296.0
+# --------------------------------------------------------------------------
+# Deterministic PRNG (splitmix64) and integer-hash value noise.
+# Nothing in this file reads the clock, the network or any other file,
+# so the output depends only on the constants below.
+# --------------------------------------------------------------------------
+
+class Rng:
+    """A tiny splitmix64 generator with an explicit fixed seed."""
+
+    def __init__(self, seed):
+        self.state = seed & 0xFFFFFFFFFFFFFFFF
+
+    def next_u64(self):
+        self.state = (self.state + 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF
+        z = self.state
+        z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & 0xFFFFFFFFFFFFFFFF
+        z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & 0xFFFFFFFFFFFFFFFF
+        return z ^ (z >> 31)
+
+    def random(self):
+        """Next float in [0, 1)."""
+        return (self.next_u64() >> 11) * (1.0 / 9007199254740992.0)
+
+    def uniform(self, a, b):
+        return a + (b - a) * self.random()
 
 
-def smooth(t):
+def hash2(ix, iy):
+    """Hash a pair of integers to a float in [0, 1)."""
+    z = ((ix * 0x9E3779B97F4A7C15) ^ (iy * 0xC2B2AE3D27D4EB4F)
+         ^ 0x165667B19E3779F9) & 0xFFFFFFFFFFFFFFFF
+    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & 0xFFFFFFFFFFFFFFFF
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & 0xFFFFFFFFFFFFFFFF
+    z = z ^ (z >> 31)
+    return (z >> 11) * (1.0 / 9007199254740992.0)
+
+
+def value_noise(x, y):
+    """Smooth value noise built on hash2, in [0, 1)."""
+    ix = math.floor(x)
+    iy = math.floor(y)
+    fx = x - ix
+    fy = y - iy
+    sx = fx * fx * (3.0 - 2.0 * fx)
+    sy = fy * fy * (3.0 - 2.0 * fy)
+    v00 = hash2(ix, iy)
+    v10 = hash2(ix + 1, iy)
+    v01 = hash2(ix, iy + 1)
+    v11 = hash2(ix + 1, iy + 1)
+    top = v00 + (v10 - v00) * sx
+    bot = v01 + (v11 - v01) * sx
+    return top + (bot - top) * sy
+
+
+def fbm(x, y, octaves):
+    """Fractal sum of value_noise octaves, roughly in [0, 1)."""
+    total = 0.0
+    amp = 0.5
+    freq = 1.0
+    norm = 0.0
+    for _ in range(octaves):
+        total += amp * value_noise(x * freq, y * freq)
+        norm += amp
+        amp *= 0.5
+        freq *= 2.03
+    return total / norm
+
+
+def clamp01(v):
+    if v < 0.0:
+        return 0.0
+    if v > 1.0:
+        return 1.0
+    return v
+
+
+def smoothstep(a, b, v):
+    t = clamp01((v - a) / (b - a))
     return t * t * (3.0 - 2.0 * t)
 
 
-def vnoise(x, y):
-    """Value noise on a unit lattice; callers scale the coordinates."""
-    xi = math.floor(x)
-    yi = math.floor(y)
-    xf = smooth(x - xi)
-    yf = smooth(y - yi)
-    a = ihash(int(xi), int(yi))
-    b = ihash(int(xi) + 1, int(yi))
-    c = ihash(int(xi), int(yi) + 1)
-    d = ihash(int(xi) + 1, int(yi) + 1)
-    return a + (b - a) * xf + (c - a) * yf + (a - b - c + d) * xf * yf
-
-
-def fbm(x, y, octaves=4):
-    v = 0.0
-    amp = 0.5
-    tot = 0.0
-    for _ in range(octaves):
-        v += amp * vnoise(x, y)
-        tot += amp
-        x *= 2.03
-        y *= 1.97
-        amp *= 0.5
-    return v / tot
-
-
-class LCG:
-    """Fixed-seed linear congruential generator."""
-
-    def __init__(self, seed):
-        self.s = seed & 0xFFFFFFFF
-
-    def next(self):
-        self.s = (self.s * 1664525 + 1013904223) & 0xFFFFFFFF
-        return self.s / 4294967296.0
-
-    def range(self, lo, hi):
-        return lo + (hi - lo) * self.next()
-
-
-def make_lut(stops):
-    """stops: [(pos0..1, (r, g, b)), ...] -> 256-entry gradient LUT."""
-    lut = []
-    for i in range(256):
-        t = i / 255.0
-        for k in range(len(stops) - 1):
-            p0, c0 = stops[k]
-            p1, c1 = stops[k + 1]
-            if p0 <= t <= p1:
-                f = 0.0 if p1 == p0 else (t - p0) / (p1 - p0)
-                lut.append((
-                    c0[0] + (c1[0] - c0[0]) * f,
-                    c0[1] + (c1[1] - c0[1]) * f,
-                    c0[2] + (c1[2] - c0[2]) * f,
-                ))
-                break
-        else:
-            lut.append(stops[-1][1])
-    return lut
-
-
-# Palettes -------------------------------------------------------------------
-# Feather tips run all the way to a pale-gold near-white so the wing edges
-# catch light against the dark vortex (thumbnail legibility).
-LUT_FEATHER = make_lut([          # crimson -> scarlet -> orange -> gold -> pale
-    (0.00, (100, 8, 26)),
-    (0.34, (186, 26, 22)),
-    (0.62, (242, 88, 14)),
-    (0.86, (255, 162, 32)),
-    (1.00, (255, 226, 146)),
-])
-LUT_FEATHER_FAR = make_lut([      # far wing: same family, deeper and cooler
-    (0.00, (74, 8, 32)),
-    (0.40, (144, 20, 34)),
-    (0.74, (204, 54, 28)),
-    (1.00, (246, 140, 56)),
-])
-LUT_BODY = make_lut([             # tail crimson -> chest white-hot gold
-    (0.00, (146, 14, 26)),
-    (0.45, (220, 54, 18)),
-    (0.75, (253, 132, 26)),
-    (1.00, (255, 202, 90)),
-])
-LUT_VORTEX = make_lut([           # storm disc: deep ink -> teal -> cyan edge
-    (0.00, (9, 14, 50)),
-    (0.35, (13, 50, 104)),
-    (0.62, (11, 106, 142)),
-    (0.85, (36, 182, 200)),
-    (1.00, (158, 240, 244)),
-])
-LUT_RING = make_lut([             # sun-ring: deep gold -> white hot
-    (0.00, (150, 76, 10)),
-    (0.45, (236, 142, 22)),
-    (0.80, (255, 200, 76)),
-    (1.00, (255, 248, 205)),
-])
-LUT_SHARD = make_lut([
-    (0.00, (204, 112, 26)),
-    (0.60, (255, 190, 72)),
-    (1.00, (255, 244, 196)),
-])
-LUT_SCALLOP = make_lut([          # belly scales: bright lip -> deep shade
-    (0.00, (252, 154, 54)),
-    (0.55, (240, 104, 24)),
-    (1.00, (182, 42, 18)),
-])
-
-
-def noise_field(freq, ox, oy, octaves):
-    """fbm precomputed on a coarse lattice (8 px cells), bilinearly sampled.
-
-    The nebula and vortex turbulence are low-frequency, so a lattice field
-    is visually identical to per-pixel fbm at a fraction of the cost.
-    """
-    cell = 8
-    n = W // cell + 2
-    vals = [0.0] * (n * n)
-    for j in range(n):
-        for i in range(n):
-            vals[j * n + i] = fbm((i * cell) / W * freq + ox,
-                                  (j * cell) / H * freq + oy, octaves)
-
-    def sample(x, y):
-        gx = x / cell
-        gy = y / cell
-        xi = int(gx)
-        yi = int(gy)
-        xf = smooth(gx - xi)
-        yf = smooth(gy - yi)
-        xi = min(xi, n - 2)
-        yi = min(yi, n - 2)
-        a = vals[yi * n + xi]
-        b = vals[yi * n + xi + 1]
-        c = vals[(yi + 1) * n + xi]
-        d = vals[(yi + 1) * n + xi + 1]
-        return a + (b - a) * xf + (c - a) * yf + (a - b - c + d) * xf * yf
-
-    return sample
-
-
-FIELD_A = noise_field(5.0, 11.0, 3.0, 4)    # nebula body
-FIELD_B = noise_field(11.0, 40.0, 9.0, 3)   # nebula detail / vortex turbulence
-
-# ---------------------------------------------------------------------------
-# Canvas: three float planes
-# ---------------------------------------------------------------------------
-
-R = array('f', bytes(4 * W * H))
-G = array('f', bytes(4 * W * H))
-B = array('f', bytes(4 * W * H))
-
-
-def background():
-    """Deep indigo void with a slow nebula swell and sparse stars."""
-    for y in range(H):
-        ny = y / H
-        row = y * W
-        for x in range(W):
-            nx = x / W
-            n = FIELD_A(x, y)
-            n2 = FIELD_B(x, y)
-            # darker toward the lower-left, a faint glow upper-right
-            d = 0.72 + 0.28 * (nx * 0.6 + (1.0 - ny) * 0.4)
-            r = (7.0 + 26.0 * n + 6.0 * n2) * d
-            g = (5.0 + 14.0 * n + 10.0 * n2) * d
-            b = (20.0 + 34.0 * n + 16.0 * n2) * d
-            # a breath of teal where the nebula knots brighten
-            if n > 0.62:
-                k = (n - 0.62) * 1.4
-                g += 22.0 * k
-                b += 26.0 * k
-            i = row + x
-            R[i] = r
-            G[i] = g
-            B[i] = b
-    # stars: deterministic sparse points with a soft core
-    rng = LCG(20261116)
-    for _ in range(420):
-        x = rng.next() * W
-        y = rng.next() * H
-        s = rng.next()
-        if s < 0.82:
-            continue
-        bright = 90.0 + 150.0 * rng.next()
-        stamp(x, y, 1.6 + 2.2 * rng.next(), bright, bright * 0.95,
-              bright * 0.85, falloff=2.0)
-
-
-def stamp(cx, cy, radius, r, g, b, falloff=2.0):
-    """Additive radial glow stamp."""
-    x0 = max(0, int(cx - radius))
-    x1 = min(W - 1, int(cx + radius))
-    y0 = max(0, int(cy - radius))
-    y1 = min(H - 1, int(cy + radius))
-    inv = 1.0 / (radius * radius)
-    for y in range(y0, y1 + 1):
-        dy = y - cy
-        row = y * W
-        for x in range(x0, x1 + 1):
-            dx = x - cx
-            d2 = (dx * dx + dy * dy) * inv
-            if d2 < 1.0:
-                f = (1.0 - d2) ** falloff
-                i = row + x
-                R[i] += r * f
-                G[i] += g * f
-                B[i] += b * f
-
-
-# ---------------------------------------------------------------------------
-# Polygon rasteriser with interpolated (u, v) attributes.
-# colour(u, v) -> (r, g, b, alpha, mode); mode is 'over' or 'add'.
-# ---------------------------------------------------------------------------
-
-
-def fill_poly(pts, colour):
-    """pts: list of (x, y, u, v). Scanline fill with attribute lerp."""
-    ys = [p[1] for p in pts]
-    y0 = max(0, int(math.floor(min(ys))))
-    y1 = min(H - 1, int(math.ceil(max(ys))))
-    n = len(pts)
-    edges = []
-    for i in range(n):
-        xa, ya, ua, va = pts[i]
-        xb, yb, ub, vb = pts[(i + 1) % n]
-        if ya != yb:
-            edges.append((ya, yb, xa, xb, ua, ub, va, vb))
-    for y in range(y0, y1 + 1):
-        yc = y + 0.5
-        hits = []
-        for (ya, yb, xa, xb, ua, ub, va, vb) in edges:
-            if (ya <= yc < yb) or (yb <= yc < ya):
-                t = (yc - ya) / (yb - ya)
-                hits.append((xa + (xb - xa) * t,
-                             ua + (ub - ua) * t,
-                             va + (vb - va) * t))
-        if len(hits) < 2:
-            continue
-        hits.sort(key=lambda h: h[0])
-        row = y * W
-        for k in range(0, len(hits) - 1, 2):
-            xa, ua, va = hits[k]
-            xb, ub, vb = hits[k + 1]
-            x0 = max(0, int(math.ceil(xa)))
-            x1 = min(W - 1, int(math.floor(xb)))
-            if x1 < x0:
-                continue
-            span = xb - xa
-            for x in range(x0, x1 + 1):
-                t = 0.0 if span == 0 else (x + 0.5 - xa) / span
-                u = ua + (ub - ua) * t
-                v = va + (vb - va) * t
-                r, g, b, a, mode = colour(u, v)
-                if a <= 0.0:
-                    continue
-                i = row + x
-                if mode == 'add':
-                    R[i] += r * a
-                    G[i] += g * a
-                    B[i] += b * a
-                else:
-                    ia = 1.0 - a
-                    R[i] = R[i] * ia + r * a
-                    G[i] = G[i] * ia + g * a
-                    B[i] = B[i] * ia + b * a
-
-
-def bezier(p0, p1, p2, t):
-    mt = 1.0 - t
-    return (mt * mt * p0[0] + 2 * mt * t * p1[0] + t * t * p2[0],
-            mt * mt * p0[1] + 2 * mt * t * p1[1] + t * t * p2[1])
-
-
-def bezier_tangent(p0, p1, p2, t):
-    return (2 * (1 - t) * (p1[0] - p0[0]) + 2 * t * (p2[0] - p1[0]),
-            2 * (1 - t) * (p1[1] - p0[1]) + 2 * t * (p2[1] - p1[1]))
-
-
-def feather(p0, p1, p2, w_base, w_mid, lut, dark=1.0, segs=14):
-    """One tapered feather along a quadratic bezier spine.
-
-    u runs along the feather (0 base, 1 tip); v runs across (-1..1) and
-    shades it like a cylinder, with a bright rim on the +v edge and a
-    darker quill line down the middle.
-    """
-    left = []
-    right = []
-    for s in range(segs + 1):
-        t = s / segs
-        cx, cy = bezier(p0, p1, p2, t)
-        tx, ty = bezier_tangent(p0, p1, p2, t)
-        tl = math.hypot(tx, ty) or 1.0
-        nx, ny = -ty / tl, tx / tl
-        # width profile: grows from the base, widest ~40% along, gone at tip
-        w = (w_base * (1.0 - t) + w_mid * 4.0 * t * (1.0 - t)) * (1.0 - t * t * 0.92)
-        left.append((cx + nx * w, cy + ny * w, t, -1.0))
-        right.append((cx - nx * w, cy - ny * w, t, 1.0))
-    pts = left + right[::-1]
-
-    def colour(u, v):
-        cr, cg, cb = lut[min(255, max(0, int(u * 255)))]
-        shade = 0.80 + 0.34 * (v * 0.5 + 0.5)
-        r, g, b = cr * shade * dark, cg * shade * dark, cb * shade * dark
-        if v > 0.78:  # rim light on the leading edge
-            f = (v - 0.78) / 0.22
-            r += 120.0 * f
-            g += 84.0 * f
-            b += 30.0 * f
-        if abs(v) < 0.10:  # quill line
-            f = 1.0 - abs(v) / 0.10
-            r *= 1.0 - 0.30 * f
-            g *= 1.0 - 0.30 * f
-            b *= 1.0 - 0.30 * f
-        return (r, g, b, 1.0, 'over')
-
-    fill_poly(pts, colour)
-
-
-# ---------------------------------------------------------------------------
-# Scene pieces
-# ---------------------------------------------------------------------------
-
-CX, CY = 600.0, 400.0      # vortex / ring centre
-RING_R = 318.0             # ring mid radius
-
-
-def vortex():
-    """A swirling storm disc behind the bird: log-spiral arms, teal on ink."""
-    rad = 352.0
-    x0 = max(0, int(CX - rad))
-    x1 = min(W - 1, int(CX + rad))
-    y0 = max(0, int(CY - rad))
-    y1 = min(H - 1, int(CY + rad))
-    for y in range(y0, y1 + 1):
-        dy = y - CY
-        row = y * W
-        for x in range(x0, x1 + 1):
-            dx = x - CX
-            d2 = dx * dx + dy * dy
-            if d2 > rad * rad:
-                continue
-            d = math.sqrt(d2)
-            ang = math.atan2(dy, dx)
-            # arms fade toward the centre so they dissolve into a dark core.
-            # The arm contrast is deliberately hard: with soft arms the disc
-            # shades like a glossy ball; hard lanes read as a storm.
-            arm = 0.30 + 0.70 * smooth(min(1.0, d / (rad * 0.55)))
-            swirl = 0.5 + 0.5 * math.sin(ang * 3.0 + d * 0.011
-                                         + 1.8 * math.sin(ang * 2.0 - d * 0.005))
-            turb = FIELD_B(x * 1.15 + 130.0, y * 1.15 + 60.0)
-            t = max(0.0, min(1.0, (0.5 + (swirl - 0.5) * 1.30 * arm) * 0.62
-                             + turb * 0.48 - d / rad * 0.10))
-            if d < rad * 0.20:
-                t *= 0.55 + 0.45 * (d / (rad * 0.20))
-            cr, cg, cb = LUT_VORTEX[int(t * 255)]
-            edge = 1.0 - smooth((d - rad * 0.86) / (rad * 0.14)) if d > rad * 0.86 else 1.0
-            a = 0.92 * edge
-            i = row + x
-            ia = 1.0 - a
-            R[i] = R[i] * ia + cr * a
-            G[i] = G[i] * ia + cg * a
-            B[i] = B[i] * ia + cb * a
-    # a dim eye of the storm, upper-left of centre
-    stamp(CX - 60, CY - 46, 120.0, 13.0, 46.0, 56.0, falloff=2.0)
-
-
-def ring():
-    """The shattered sun-ring, painted per pixel so its light stays smooth.
-
-    A golden annulus around the vortex: white-hot along its centre line,
-    its edges crumbled by angular noise, with two broken sectors — a wide
-    one at the lower left (where the bird burst through) and a narrower
-    one at the upper right (where it is heading). Inside the gaps only
-    high-noise teeth of gold survive. A faint halo hugs the inner edge.
-    Angles are degrees in image space: 0 right, 90 down, 180 left, -90 up.
-    """
-    rad = RING_R * 1.32
-    x0 = max(0, int(CX - rad))
-    x1 = min(W - 1, int(CX + rad))
-    y0 = max(0, int(CY - rad))
-    y1 = min(H - 1, int(CY + rad))
-    gaps = [(104.0, 146.0), (-78.0, -38.0)]
-    for y in range(y0, y1 + 1):
-        dy = y - CY
-        row = y * W
-        for x in range(x0, x1 + 1):
-            dx = x - CX
-            d2 = dx * dx + dy * dy
-            if d2 > rad * rad:
-                continue
-            d = math.sqrt(d2)
-            off = d - RING_R
-            if off > 120.0 or off < -170.0:
-                continue
-            ang = math.degrees(math.atan2(dy, dx))
-            # periodic angular chunk noise + fine radial brushing
-            ero = vnoise(3.1 + 1.9 * math.cos(math.radians(ang)),
-                         5.7 + 1.9 * math.sin(math.radians(ang)))
-            brush = vnoise(d * 0.045, 8.8)
-            # wide width swing: the ring swells and pinches like broken
-            # rock instead of running at one smooth pipe diameter
-            half = 16.0 + 28.0 * ero
-            i = row + x
-            in_gap = any(g0 <= ang <= g1 for (g0, g1) in gaps)
-            if abs(off) <= half + 8.0:
-                heat = max(0.0, 1.0 - abs(off) / half) ** 1.25
-                cover = min(1.0, (half + 4.0 - abs(off)) / 8.0)
-                if in_gap:
-                    # only crumbled teeth survive inside a broken sector
-                    cover *= max(0.0, (ero - 0.60) * 2.4) * max(
-                        0.0, (brush - 0.34) * 2.0)
-                if cover > 0.01:
-                    flick = 0.82 + 0.34 * brush
-                    cr, cg, cb = LUT_RING[int((0.30 + 0.70 * heat) * 255)]
-                    a = 0.97 * cover
-                    ia = 1.0 - a
-                    R[i] = R[i] * ia + cr * flick * a
-                    G[i] = G[i] * ia + cg * flick * a
-                    B[i] = B[i] * ia + cb * flick * a
-            elif -170.0 <= off < -half - 8.0:
-                # faint halo spilling inward from the ring's inner edge
-                f = 1.0 - (-off - half) / 150.0
-                if f > 0.0:
-                    R[i] += 34.0 * f * f
-                    G[i] += 15.0 * f * f
-                    B[i] += 2.0 * f * f
-    # soft glow pooled at the ring's unbroken top and left (not in a gap)
-    stamp(CX + 30, CY - 300, 150.0, 40.0, 19.0, 2.0)
-    stamp(CX - 262, CY - 60, 140.0, 36.0, 16.0, 2.0)
-
-
-def backlight(bx, by):
-    """A warm bloom behind the bird, laid down before the bird is drawn.
-
-    The vortex behind the body is mid-teal; this halo of hot amber light
-    separates the crimson silhouette from it, so the bird still pops when
-    the picture is shrunk to thumbnail size.
-    """
-    stamp(bx, by - 40.0, 330.0, 46.0, 20.0, 3.0, falloff=1.6)
-    stamp(bx, by - 60.0, 190.0, 66.0, 30.0, 4.0, falloff=1.8)
-
-
-# Bird geometry lives in a local frame, then rotates about the body centre.
-BX, BY = 514.0, 514.0
-ROT = math.radians(-18.0)
-COSR, SINR = math.cos(ROT), math.sin(ROT)
-
-
-def xf(px, py):
-    """local -> image coords (rotate about the bird centre)."""
-    return (BX + px * COSR - py * SINR, BY + px * SINR + py * COSR)
-
-
-def feather_xf(p0, p1, p2, wb, wm, lut, dark=1.0, segs=14):
-    feather(xf(*p0), xf(*p1), xf(*p2), wb, wm, lut, dark, segs)
-
-
-def wing(side, lut, dark, reach, lift, sec_len=0.56, prim_w=34.0):
-    """A raised wing: three rows of feathers fanning from the shoulder.
-
-    side: +1 right wing, -1 left wing (mirrored in local space).
-    Primaries sweep up and out; secondaries sit under them; coverts are a
-    row of small petals at the base. sec_len and prim_w let the far wing
-    be filled in more densely so it does not read as bare spikes.
-    """
-    sh = (side * 26.0, -96.0)                     # shoulder
-    n_prim = 11
-    for i in range(n_prim):
-        f = i / (n_prim - 1)                      # 0 inner .. 1 outer
-        # fan: inner feathers point up, outer ones up-and-out
-        length = reach * (0.70 + 0.42 * math.sin(f * math.pi * 0.75))
-        tip = (sh[0] + side * length * math.sin(0.35 + 0.85 * f) * 1.02,
-               sh[1] - length * math.cos(0.30 + 0.62 * f) - lift * f)
-        ctrl = (sh[0] + (tip[0] - sh[0]) * 0.45 + side * 26.0,
-                sh[1] + (tip[1] - sh[1]) * 0.45 - 18.0)
-        feather_xf(sh, ctrl, tip, 16.0, prim_w - 7.0 * f, lut, dark)
-    n_sec = 8
-    for i in range(n_sec):
-        f = i / (n_sec - 1)
-        base = (sh[0] + side * 6.0, sh[1] + 26.0)
-        length = reach * sec_len * (0.82 + 0.30 * math.sin(f * math.pi))
-        tip = (base[0] + side * length * math.sin(0.25 + 0.8 * f),
-               base[1] - length * math.cos(0.22 + 0.55 * f) - lift * 0.4 * f)
-        ctrl = (base[0] + (tip[0] - base[0]) * 0.5 + side * 16.0,
-                base[1] + (tip[1] - base[1]) * 0.5 - 10.0)
-        feather_xf(base, ctrl, tip, 15.0, 29.0, lut, dark * 0.96)
-    # coverts: small petals hugging the shoulder
-    for i in range(7):
-        f = i / 6.0
-        base = (sh[0] - side * 4.0, sh[1] + 8.0 + 10.0 * f)
-        tip = (base[0] + side * (48.0 + 64.0 * f), base[1] - 66.0 - 46.0 * f)
-        ctrl = (base[0] + (tip[0] - base[0]) * 0.5 + side * 8.0,
-                base[1] + (tip[1] - base[1]) * 0.5)
-        feather_xf(base, ctrl, tip, 13.0, 19.0, lut, dark * 1.02, segs=8)
-
-
-def tail():
-    """Six long streamers flowing down-left from the tail base."""
-    base = (-6.0, 128.0)
-    specs = [
-        (-150.0, 330.0, -60.0),
-        (-96.0, 372.0, -30.0),
-        (-36.0, 392.0, -6.0),
-        (28.0, 380.0, 18.0),
-        (88.0, 344.0, 40.0),
-        (138.0, 292.0, 58.0),
-    ]
-    for (dx, dy, bow) in specs:
-        tip = (base[0] + dx, base[1] + dy)
-        ctrl = (base[0] + dx * 0.4 + bow, base[1] + dy * 0.45)
-        feather_xf(base, ctrl, tip, 13.0, 21.0, LUT_FEATHER, 0.94, segs=18)
-
-
-def body_and_head():
-    """Teardrop body on a gentle S spine, then the head in profile."""
-    spine = []
-    for s in range(21):
-        t = s / 20.0
-        # spine from head base (0,-150) to tail tip (-4, 168)
-        x = 14.0 * math.sin(t * math.pi * 0.9) - 4.0 * t
-        y = -150.0 + 318.0 * t
-        spine.append((x, y, t))
-    left, right = [], []
-    for (x, y, t) in spine:
-        hw = 58.0 * math.sin(math.pi * min(1.0, 0.12 + t * 0.98)) ** 0.8
-        hw *= (1.0 - 0.25 * t)
-        left.append((*xf(x - hw, y), t, -1.0))
-        right.append((*xf(x + hw, y), t, 1.0))
-    pts = left + right[::-1]
-
-    def colour(u, v):
-        cr, cg, cb = LUT_BODY[int(max(0, min(255, (1.0 - u) * 255)))]
-        shade = 0.78 + 0.36 * (1.0 - abs(v))   # cylindrical: bright spine
-        return (cr * shade, cg * shade, cb * shade, 1.0, 'over')
-
-    fill_poly(pts, colour)
-
-    # scalloped scale rows down the belly: long narrow petals, staggered,
-    # fading in below the chest core
-    for row_i in range(8):
-        t = 0.40 + row_i * 0.072
-        sx = 14.0 * math.sin(t * math.pi * 0.9) - 4.0 * t
-        sy = -150.0 + 318.0 * t
-        hw = 58.0 * math.sin(math.pi * min(1.0, 0.12 + t * 0.98)) ** 0.8
-        hw *= (1.0 - 0.25 * t)
-        shift = 7.0 if row_i % 2 else 0.0
-        for fx in (-0.60, 0.0, 0.60):
-            p0 = (sx + fx * hw * 0.86 + shift, sy - 6.0)
-            p2 = (sx + fx * hw * 0.94 + shift, sy + 42.0)
-            p1 = (p0[0] + (p2[0] - p0[0]) * 0.5 + fx * 5.0,
-                  p0[1] + (p2[1] - p0[1]) * 0.5)
-            feather_xf(p0, p1, p2, 6.0, 10.5, LUT_SCALLOP,
-                       0.86 + 0.14 * (row_i / 7.0), segs=6)
-
-    # crest first, so the head overlaps its bases: four flame feathers
-    # swept back and up from the crown
-    for (p0, p1, p2) in [
-            ((-2.0, -186.0), (-52.0, -224.0), (-108.0, -226.0)),
-            ((6.0, -192.0), (-30.0, -240.0), (-62.0, -272.0)),
-            ((16.0, -190.0), (2.0, -238.0), (-8.0, -272.0)),
-            ((-10.0, -180.0), (-64.0, -198.0), (-118.0, -192.0))]:
-        feather_xf(p0, p1, p2, 8.5, 12.5, LUT_FEATHER, 1.0, segs=10)
-
-    # head: a squashed oval, crimson crown shading to a gold face
-    hx, hy = xf(10.0, -164.0)
-    head_r = 36.0
-    pts = []
-    for s in range(20):
-        a = s / 20.0 * math.tau
-        wob = 1.0 + 0.08 * math.cos(a * 2.0 + 0.6)
-        pts.append((hx + math.cos(a) * head_r * wob,
-                    hy + math.sin(a) * head_r * (wob * 0.90),
-                    0.0, math.sin(a)))
-
-    def hcolour(u, v):
-        # v is sin(angle): -1 crown, +1 chin
-        cr, cg, cb = LUT_BODY[int(max(0, min(255, 196 - 74 * (v * 0.5 + 0.5))))]
-        return (cr, cg, cb, 1.0, 'over')
-
-    fill_poly(pts, hcolour)
-    # beak: two gold wedges pointing up-right, the direction of flight
-    pts = [(*xf(28.0, -180.0), 0, 0), (*xf(90.0, -195.0), 1, 0),
-           (*xf(32.0, -162.0), 0, 1)]
-
-    def bcolour(u, v):
-        cr = 246.0 - 30.0 * v
-        cg = 178.0 - 34.0 * v
-        cb = 60.0 - 12.0 * v
-        return (cr, cg, cb, 1.0, 'over')
-
-    fill_poly(pts, bcolour)
-    pts = [(*xf(30.0, -160.0), 0, 0), (*xf(68.0, -168.0), 1, 0),
-           (*xf(32.0, -148.0), 0, 1)]
-
-    def bcolour2(u, v):
-        return (208.0, 124.0, 36.0, 1.0, 'over')
-
-    fill_poly(pts, bcolour2)
-    # a fierce brow ridge over the eye
-    pts = [(*xf(6.0, -188.0), 0, 0), (*xf(36.0, -186.0), 1, 0),
-           (*xf(32.0, -176.0), 1, 1), (*xf(10.0, -178.0), 0, 1)]
-
-    def browcolour(u, v):
-        return (148.0, 18, 24.0, 1.0, 'over')
-
-    fill_poly(pts, browcolour)
-    # the eye: gold iris, dark pupil, one white spark
-    ex, ey = xf(21.0, -172.0)
-    stamp(ex, ey, 16.0, 54.0, 30.0, 6.0)
-    for (rad, col) in [(7.6, (255.0, 206.0, 92.0)), (4.3, (24.0, 8, 8.0))]:
-        pts = []
-        for s in range(14):
-            a = s / 14.0 * math.tau
-            pts.append((ex + math.cos(a) * rad, ey + math.sin(a) * rad, 0, 0))
-
-        def ecolour(u, v, _c=col):
-            return (_c[0], _c[1], _c[2], 1.0, 'over')
-
-        fill_poly(pts, ecolour)
-    stamp(ex - 2.0, ey - 2.0, 3.4, 160.0, 150.0, 120.0)
-
-
-def _shard_poly(cx, cy, size, rot, stretch):
-    pts = []
-    for (lx, ly) in [(-1.0, 0.0), (0.2, -0.42), (1.0, 0.05), (0.1, 0.46)]:
-        rx = lx * size * stretch
-        ry = ly * size
-        pts.append((cx + rx * math.cos(rot) - ry * math.sin(rot),
-                    cy + rx * math.sin(rot) + ry * math.cos(rot),
-                    (lx + 1.0) / 2.0, ly + 0.5))
-    return pts
-
-
-def _shard_colour(bright):
-    def colour(u, v):
-        cr, cg, cb = LUT_SHARD[int(max(0, min(255, u * 255)))]
-        sh = (0.60 + 0.58 * v) * bright
-        return (cr * sh, cg * sh, cb * sh, 0.96, 'over')
-
-    return colour
-
-
-def shards(count, seed, behind):
-    """Polygons of the broken ring bursting outward toward the viewer.
-
-    Shards fly along radial lines from the ring centre; the ones marked
-    'behind' are drawn before the bird, the rest after — some crossing
-    the bird's silhouette, which sells the burst-through moment.
-    """
-    rng = LCG(seed)
-    for _ in range(count):
-        ang = rng.next() * math.tau
-        dist = RING_R * (0.82 + 0.75 * rng.next() ** 1.6)
-        cx = CX + math.cos(ang) * dist
-        cy = CY + math.sin(ang) * dist
-        size = 5.0 + 23.0 * rng.next() ** 2 * (0.45 + dist / RING_R)
-        if behind and size > 24.0:
-            continue
-        if not behind and abs(cx - (BX + 10.0)) < 95.0 \
-                and BY + 30.0 < cy < BY + 300.0:
-            continue   # keep the body's own silhouette clean of stray fins
-        rot = ang + rng.range(-0.5, 0.5)
-        stretch = rng.range(1.4, 3.0)
-        fill_poly(_shard_poly(cx, cy, size, rot, stretch),
-                  _shard_colour(rng.range(0.55, 1.0)))
-        if not behind and rng.next() < 0.5:
-            stamp(cx, cy, size * 0.9, 30.0, 16.0, 2.0)
-
-
-def burst_at_gap():
-    """The burst point: a flash and a fan of shards at the ring's broken
-    upper-right sector, where the bird is breaking out toward the viewer."""
-    gx = CX + math.cos(math.radians(-58.0)) * RING_R
-    gy = CY + math.sin(math.radians(-58.0)) * RING_R
-    stamp(gx, gy, 95.0, 120.0, 58.0, 8.0)
-    stamp(gx, gy, 34.0, 210.0, 150.0, 70.0)
-    rng = LCG(31337)
-    for _ in range(13):
-        ang = math.radians(-58.0) + rng.range(-0.55, 0.55)
-        dist = RING_R * rng.range(0.92, 1.38)
-        cx = CX + math.cos(ang) * dist
-        cy = CY + math.sin(ang) * dist
-        size = rng.range(9.0, 30.0)
-        rot = ang + rng.range(-0.4, 0.4)
-        stretch = rng.range(1.6, 3.2)
-        fill_poly(_shard_poly(cx, cy, size, rot, stretch),
-                  _shard_colour(rng.range(0.75, 1.05)))
-
-
-def embers_and_streaks():
-    """Additive light: ember streams on the diagonal, motion streaks
-    trailing the embers, and speed lines radiating from the ring centre."""
-    rng = LCG(777002)
-    # ember stream A: trailing off down-left with the tail
-    for _ in range(300):
-        t = rng.next()
-        cx = 456.0 - 420.0 * t + rng.range(-46, 46)
-        cy = 698.0 + 300.0 * t + rng.range(-40, 40)
-        s = rng.range(1.2, 4.6) * (1.0 - t * 0.5)
-        hot = rng.range(0.4, 1.0)
-        stamp(cx, cy, s * 2.4, 200.0 * hot, 92.0 * hot, 14.0 * hot)
-    # ember stream B: bursting up-right past the ring
-    for _ in range(260):
-        t = rng.next()
-        cx = 644.0 + 360.0 * t + rng.range(-52, 52)
-        cy = 338.0 - 260.0 * t + rng.range(-46, 46)
-        s = rng.range(1.2, 5.0) * (1.0 - t * 0.4)
-        hot = rng.range(0.4, 1.0)
-        if rng.next() < 0.22:  # a few cool sparks for contrast
-            stamp(cx, cy, s * 2.2, 30.0 * hot, 130.0 * hot, 140.0 * hot)
-        else:
-            stamp(cx, cy, s * 2.4, 210.0 * hot, 110.0 * hot, 20.0 * hot)
-    # motion streaks: thin additive blades along the flight diagonal
-    # (down-left trailing the tail, up-right leading the burst). Round
-    # embers alone read as static sparks; blades sell the velocity.
-    diag = math.radians(35.0)
-    dxu, dyu = math.cos(diag), -math.sin(diag)     # up-right unit vector
-    pxu, pyu = -dyu, dxu                           # perpendicular
-    for _ in range(46):
-        t = rng.next()
-        if t < 0.55:   # trailing blade, behind/below the bird
-            cx = 470.0 - 430.0 * rng.next() + rng.range(-30, 30)
-            cy = 700.0 + 260.0 * rng.next() + rng.range(-26, 26)
-        else:          # leading blade, up-right of the burst
-            cx = 660.0 + 330.0 * rng.next() + rng.range(-30, 30)
-            cy = 320.0 - 240.0 * rng.next() + rng.range(-26, 26)
-        ln = rng.range(30.0, 95.0)
-        wd = rng.range(1.0, 2.6)
-        glow = rng.range(0.10, 0.30)
-        pts = [(cx - dxu * ln - pxu * wd, cy - dyu * ln - pyu * wd, 0, 0),
-               (cx + dxu * ln * 0.3 - pxu * wd * 0.3,
-                cy + dyu * ln * 0.3 - pyu * wd * 0.3, 1, 0),
-               (cx + dxu * ln * 0.3 + pxu * wd * 0.3,
-                cy + dyu * ln * 0.3 + pyu * wd * 0.3, 1, 1),
-               (cx - dxu * ln + pxu * wd, cy - dyu * ln + pyu * wd, 0, 1)]
-
-        def colour(u, v, _g=glow):
-            return (255.0, 176.0, 84.0, _g * (1.0 - u), 'add')
-
-        fill_poly(pts, colour)
-    # speed streaks radiating from the ring centre
-    for _ in range(70):
-        ang = rng.next() * math.tau
-        r0 = RING_R * rng.range(0.95, 1.25)
-        ln = rng.range(26.0, 110.0)
-        wd = rng.range(1.2, 3.0)
-        cx = CX + math.cos(ang) * r0
-        cy = CY + math.sin(ang) * r0
-        dx, dy = math.cos(ang), math.sin(ang)
-        px, py = -dy, dx
-        pts = [(cx - dx * ln * 0.4 - px * wd, cy - dy * ln * 0.4 - py * wd, 0, 0),
-               (cx + dx * ln - px * wd * 0.3, cy + dy * ln - py * wd * 0.3, 1, 0),
-               (cx + dx * ln + px * wd * 0.3, cy + dy * ln + py * wd * 0.3, 1, 1),
-               (cx - dx * ln * 0.4 + px * wd, cy - dy * ln * 0.4 + py * wd, 0, 1)]
-
-        def colour2(u, v):
-            return (255.0, 190.0, 90.0, 0.16 * (1.0 - u), 'add')
-
-        fill_poly(pts, colour2)
-
-
-def post():
-    """The white-hot chest core on top, then a vignette to frame it."""
-    # the chest core: a broad warm bloom and a white-hot heart on top
-    stamp(*xf(0.0, -34.0), 130.0, 168.0, 74.0, 10.0)
-    stamp(*xf(0.0, -34.0), 30.0, 255.0, 214.0, 130.0)
-    cx, cy = BX, BY - 60.0
-    maxd2 = (W * 0.72) ** 2
-    for y in range(H):
-        dy = y - cy
-        row = y * W
-        for x in range(W):
-            dx = x - cx
-            d2 = dx * dx + dy * dy
-            f = 1.0 - 0.38 * max(0.0, (d2 / maxd2 - 0.35)) / 0.65
-            i = row + x
-            R[i] *= f
-            G[i] *= f
-            B[i] *= f
-
-
-# Gentle S-curve with a slight lift, applied when quantising to bytes.
-TONE = [min(255, max(0, int(255.0 * ((v / 255.0) ** 1.06
-        + 0.10 * math.sin((v / 255.0) * math.pi) * (v / 255.0) * (1 - v / 255.0)
-        )))) for v in range(256)]
-
-
-# ---------------------------------------------------------------------------
-# PNG writer (filter Sub, zlib level 9). Pure stdlib.
-# ---------------------------------------------------------------------------
-
-
-def write_png(path):
+def mix3(c0, c1, t):
+    return (c0[0] + (c1[0] - c0[0]) * t,
+            c0[1] + (c1[1] - c0[1]) * t,
+            c0[2] + (c1[2] - c0[2]) * t)
+
+
+# --------------------------------------------------------------------------
+# PNG encoder.  Each row picks the better of the Sub and Up filters by a
+# signed-byte score, which keeps the smooth gradients small; zlib does
+# the rest.  Fixed inputs and a fixed zlib level give identical bytes.
+# --------------------------------------------------------------------------
+
+def write_png(path, w, h, rgb):
+    stride = w * 3
     raw = bytearray()
-    for y in range(H):
-        row = y * W
-        line = bytearray(W * 3)
-        j = 0
-        for x in range(W):
-            i = row + x
-            line[j] = TONE[min(255, max(0, int(R[i])))]
-            line[j + 1] = TONE[min(255, max(0, int(G[i])))]
-            line[j + 2] = TONE[min(255, max(0, int(B[i])))]
-            j += 3
-        # Sub filter
-        filt = bytearray(W * 3)
-        for k in range(W * 3):
-            left = line[k - 3] if k >= 3 else 0
-            filt[k] = (line[k] - left) & 0xFF
-        raw.append(1)
-        raw += filt
-    comp = zlib.compress(bytes(raw), 9)
+    prev = bytearray(stride)
+    for y in range(h):
+        row = rgb[y * stride:(y + 1) * stride]
+        filt_sub = bytearray(stride)
+        filt_up = bytearray(stride)
+        score_sub = 0
+        score_up = 0
+        for i in range(stride):
+            v = row[i]
+            left = row[i - 3] if i >= 3 else 0
+            up = prev[i]
+            fs = (v - left) & 0xFF
+            fu = (v - up) & 0xFF
+            filt_sub[i] = fs
+            filt_up[i] = fu
+            score_sub += fs if fs < 128 else 256 - fs
+            score_up += fu if fu < 128 else 256 - fu
+        if score_sub <= score_up:
+            raw.append(1)
+            raw += filt_sub
+        else:
+            raw.append(2)
+            raw += filt_up
+        prev = row
 
     def chunk(tag, data):
-        c = struct.pack('>I', len(data)) + tag + data
-        return c + struct.pack('>I', zlib.crc32(tag + data) & 0xFFFFFFFF)
+        out = struct.pack(">I", len(data)) + tag + data
+        out += struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        return out
 
-    png = (b'\x89PNG\r\n\x1a\n'
-           + chunk(b'IHDR', struct.pack('>IIBBBBB', W, H, 8, 2, 0, 0, 0))
-           + chunk(b'IDAT', comp)
-           + chunk(b'IEND', b''))
-    with open(path, 'wb') as f:
-        f.write(png)
+    png = b"\x89PNG\r\n\x1a\n"
+    png += chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+    png += chunk(b"IDAT", zlib.compress(bytes(raw), 6))
+    png += chunk(b"IEND", b"")
+    with open(path, "wb") as fh:
+        fh.write(png)
+
+
+# --------------------------------------------------------------------------
+# Background: deep indigo water, a pool of teal light mid-frame, god rays
+# falling from the moon, expanding ripple rings and the moon itself.
+# A low-resolution fbm grid is precomputed once and bilinearly sampled so
+# the per-pixel loop stays cheap.
+# --------------------------------------------------------------------------
+
+GRID = 256
+
+
+def make_shimmer_grid():
+    g = array("f", bytes(4 * GRID * GRID))
+    for gy in range(GRID):
+        for gx in range(GRID):
+            g[gy * GRID + gx] = fbm(gx * 0.055, gy * 0.055, 3)
+    return g
+
+
+def grid_sample(g, fx, fy):
+    """Bilinear sample of the GRID x GRID float grid at float coords."""
+    if fx < 0.0:
+        fx = 0.0
+    if fy < 0.0:
+        fy = 0.0
+    if fx > GRID - 1.001:
+        fx = GRID - 1.001
+    if fy > GRID - 1.001:
+        fy = GRID - 1.001
+    ix = int(fx)
+    iy = int(fy)
+    tx = fx - ix
+    ty = fy - iy
+    i00 = iy * GRID + ix
+    top = g[i00] + (g[i00 + 1] - g[i00]) * tx
+    bot = g[i00 + GRID] + (g[i00 + GRID + 1] - g[i00 + GRID]) * tx
+    return top + (bot - top) * ty
+
+
+TOP_COL = (0.034, 0.068, 0.185)
+BOT_COL = (0.003, 0.008, 0.034)
+POOL_COL = (0.030, 0.135, 0.165)
+MOON_COL = (1.38, 1.29, 1.10)
+HALO_COL = (0.95, 0.82, 0.58)
+RAY_COL = (0.50, 0.64, 0.86)
+RIPPLE_COL = (0.55, 0.75, 0.90)
+
+RIPPLES = ((MOON_X, MOON_Y, 0.105, 0.050),
+           (428.0, 648.0, 0.135, 0.030),
+           (655.0, 762.0, 0.155, 0.022))
+
+
+def paint_background(buf_r, buf_g, buf_b, shimmer):
+    scale = (GRID - 1) / float(W)
+    for y in range(H):
+        v = y / (H - 1)
+        grad = mix3(TOP_COL, BOT_COL, v ** 1.12)
+        base_r, base_g, base_b = grad
+        fy = y * scale
+        row = y * W
+        for x in range(W):
+            dxm = x - MOON_X
+            dym = y - MOON_Y
+            dm2 = dxm * dxm + dym * dym
+            dm = math.sqrt(dm2)
+
+            r = base_r
+            g = base_g
+            b = base_b
+
+            # A soft pool of teal light in the middle depths.
+            dcx = x - 512.0
+            dcy = y - 545.0
+            dc2 = dcx * dcx + dcy * dcy
+            pool = 1.0 / (1.0 + dc2 / 108900.0)
+            r += POOL_COL[0] * pool
+            g += POOL_COL[1] * pool
+            b += POOL_COL[2] * pool
+
+            # Slow caustic shimmer from the precomputed noise grid.
+            sh = grid_sample(shimmer, x * scale, fy)
+            lift = (sh - 0.5) * 0.055
+            r += lift * 0.6
+            g += lift * 0.9
+            b += lift
+
+            # God rays: bright shafts angled around the moon, strongest
+            # below it and fading with distance.  The vertical fade is
+            # smooth -- a hard gate printed a visible horizontal band.
+            if dym > -60.0:
+                ang = math.atan2(dxm, dym + 40.0)
+                ray = 0.5 + 0.5 * math.sin(ang * 9.0 + 1.3 * math.sin(ang * 4.0 + 0.7))
+                ray = ray * ray * ray
+                ray *= 1.0 / (1.0 + dm / 250.0)
+                ray *= 0.16 * smoothstep(-60.0, 70.0, dym)
+                r += RAY_COL[0] * ray
+                g += RAY_COL[1] * ray
+                b += RAY_COL[2] * ray
+
+            # Ripple rings spreading from three centres.
+            for (cx, cy, freq, amp) in RIPPLES:
+                rx = x - cx
+                ry = y - cy
+                rr = math.sqrt(rx * rx + ry * ry)
+                ring = math.sin(rr * freq - 1.1) * 0.5 + 0.5
+                ring = ring * ring
+                ring *= amp / (1.0 + rr / 320.0)
+                r += RIPPLE_COL[0] * ring
+                g += RIPPLE_COL[1] * ring
+                b += RIPPLE_COL[2] * ring
+
+            # Moon halo: a tight warm bloom plus a wide faint one.
+            if dm > MOON_R - 8.0:
+                over = dm - MOON_R
+                halo = 0.55 / (1.0 + (over / 95.0) * (over / 95.0))
+                halo += 0.10 / (1.0 + (dm / 430.0) * (dm / 430.0))
+                r += HALO_COL[0] * halo
+                g += HALO_COL[1] * halo
+                b += HALO_COL[2] * halo
+
+            # The moon disc itself, softly edged, with a mottled face.
+            if dm < MOON_R + 7.0:
+                face = fbm(x * 0.045 + 31.7, y * 0.045 + 11.2, 3)
+                limb = 0.86 + 0.14 * (1.0 - (dm / MOON_R) ** 2)
+                mc = (MOON_COL[0] * (0.88 + 0.22 * face) * limb,
+                      MOON_COL[1] * (0.88 + 0.22 * face) * limb,
+                      MOON_COL[2] * (0.88 + 0.19 * face) * limb)
+                f = smoothstep(MOON_R + 6.0, MOON_R - 6.0, dm)
+                r = r + (mc[0] - r) * f
+                g = g + (mc[1] - g) * f
+                b = b + (mc[2] - b) * f
+
+            i = row + x
+            buf_r[i] = r
+            buf_g[i] = g
+            buf_b[i] = b
+
+
+# --------------------------------------------------------------------------
+# Koi geometry.  A spine is a cubic Bezier sampled evenly by arc length.
+# The body is stamped as a chain of discs along the spine; each pixel
+# keeps the sample it lies closest to, which yields a smooth distance
+# field plus the body coordinates (along, side) used for patterning.
+# --------------------------------------------------------------------------
+
+def cubic(p0, p1, p2, p3, t):
+    mt = 1.0 - t
+    a = mt * mt * mt
+    b = 3.0 * mt * mt * t
+    c = 3.0 * mt * t * t
+    d = t * t * t
+    return (a * p0[0] + b * p1[0] + c * p2[0] + d * p3[0],
+            a * p0[1] + b * p1[1] + c * p2[1] + d * p3[1])
+
+
+def spine_samples(p0, p1, p2, p3, step=3.0):
+    """Evenly spaced (x, y, tx, ty, t) samples; t=0 tail, t=1 head."""
+    dense = [cubic(p0, p1, p2, p3, i / 240.0) for i in range(241)]
+    lengths = [0.0]
+    for i in range(1, 241):
+        dx = dense[i][0] - dense[i - 1][0]
+        dy = dense[i][1] - dense[i - 1][1]
+        lengths.append(lengths[-1] + math.hypot(dx, dy))
+    total = lengths[-1]
+    n = max(8, int(total / step))
+    pts = []
+    j = 0
+    for i in range(n + 1):
+        target = total * i / n
+        while j < 239 and lengths[j + 1] < target:
+            j += 1
+        seg = lengths[j + 1] - lengths[j]
+        f = 0.0 if seg == 0.0 else (target - lengths[j]) / seg
+        pts.append((dense[j][0] + (dense[j + 1][0] - dense[j][0]) * f,
+                    dense[j][1] + (dense[j + 1][1] - dense[j][1]) * f))
+    samples = []
+    for i, (x, y) in enumerate(pts):
+        if i == 0:
+            tx, ty = pts[1][0] - x, pts[1][1] - y
+        elif i == n:
+            tx, ty = x - pts[i - 1][0], y - pts[i - 1][1]
+        else:
+            tx, ty = pts[i + 1][0] - pts[i - 1][0], pts[i + 1][1] - pts[i - 1][1]
+        ln = math.hypot(tx, ty) or 1.0
+        samples.append((x, y, tx / ln, ty / ln, i / n))
+    return samples
+
+
+PROFILE = ((0.00, 0.52), (0.07, 0.82), (0.18, 0.98), (0.32, 1.00),
+           (0.52, 0.90), (0.72, 0.66), (0.88, 0.46), (1.00, 0.32))
+
+
+def width_profile(u):
+    """Body half-width as a fraction of the maximum; u=0 head, u=1 tail."""
+    if u <= 0.0:
+        return PROFILE[0][1]
+    for k in range(len(PROFILE) - 1):
+        u0, w0 = PROFILE[k]
+        u1, w1 = PROFILE[k + 1]
+        if u <= u1:
+            f = (u - u0) / (u1 - u0)
+            s = f * f * (3.0 - 2.0 * f)
+            return w0 + (w1 - w0) * s
+    return PROFILE[-1][1]
+
+
+# --------------------------------------------------------------------------
+# Stamping: shared distance-field buffers the koi draw into.
+# --------------------------------------------------------------------------
+
+GS = 256  # glow grid resolution (canvas / 4)
+
+
+class Canvas:
+    def __init__(self):
+        n = W * H
+        self.body_d = array("f", [2.0]) * n      # normalised dist to spine
+        self.body_u = array("f", [0.0]) * n      # 0 at head, 1 at tail
+        self.body_side = array("f", [0.0]) * n   # signed lateral, -1..1
+        self.body_light = array("f", [0.0]) * n  # facing toward the moon
+        self.body_id = bytearray(n)
+        self.fin_a = array("f", [0.0]) * n
+        self.fin_u = array("f", [0.0]) * n
+        self.fin_side = array("f", [0.0]) * n
+        self.fin_id = bytearray(n)
+        self.glow = [array("f", [0.0]) * (GS * GS) for _ in range(2)]
+
+
+def blur_grid(g, radius):
+    """Two box-blur passes (horizontal then vertical), edge-clamped."""
+    tmp = array("f", [0.0]) * (GS * GS)
+    span = 2 * radius + 1
+    for _ in range(2):
+        for y in range(GS):
+            row = y * GS
+            for x in range(GS):
+                acc = 0.0
+                for k in range(-radius, radius + 1):
+                    xx = x + k
+                    if xx < 0:
+                        xx = 0
+                    elif xx >= GS:
+                        xx = GS - 1
+                    acc += g[row + xx]
+                tmp[row + x] = acc / span
+        for y in range(GS):
+            for x in range(GS):
+                acc = 0.0
+                for k in range(-radius, radius + 1):
+                    yy = y + k
+                    if yy < 0:
+                        yy = 0
+                    elif yy >= GS:
+                        yy = GS - 1
+                    acc += tmp[yy * GS + x]
+                g[y * GS + x] = acc / span
+
+
+class Koi:
+    def __init__(self, kid, spine, maxw, deep, mid, bright, patch, rim,
+                 glow_col, seed_a, seed_b, patch_lo, patch_hi):
+        self.kid = kid
+        self.samples = spine_samples(spine[0], spine[1], spine[2], spine[3])
+        self.maxw = maxw
+        self.deep = deep
+        self.mid = mid
+        self.bright = bright
+        self.patch = patch
+        self.rim = rim
+        self.glow_col = glow_col
+        self.seed_a = seed_a
+        self.seed_b = seed_b
+        self.patch_lo = patch_lo
+        self.patch_hi = patch_hi
+
+    def sample_at_u(self, u):
+        """The spine sample whose body coordinate u (0=head) is closest."""
+        best = None
+        best_err = 1e9
+        for s in self.samples:
+            err = abs((1.0 - s[4]) - u)
+            if err < best_err:
+                best_err = err
+                best = s
+        return best
+
+    def stamp_body(self, cv):
+        glow = cv.glow[self.kid - 1]
+        for (x, y, tx, ty, t) in self.samples:
+            u = 1.0 - t
+            r = width_profile(u) * self.maxw
+            if r < 1.5:
+                continue
+            nx, ny = -ty, tx
+            # Direction from this spine point toward the moon (for light).
+            mdx = MOON_X - x
+            mdy = MOON_Y - y
+            ml = math.hypot(mdx, mdy) or 1.0
+            mdx /= ml
+            mdy /= ml
+            x0 = max(0, int(x - r - 1))
+            x1 = min(W - 1, int(x + r + 1))
+            y0 = max(0, int(y - r - 1))
+            y1 = min(H - 1, int(y + r + 1))
+            r2 = r * r
+            for yy in range(y0, y1 + 1):
+                dy = yy - y
+                row = yy * W
+                for xx in range(x0, x1 + 1):
+                    dx = xx - x
+                    d2 = dx * dx + dy * dy
+                    if d2 > r2:
+                        continue
+                    dist = math.sqrt(d2)
+                    d = dist / r
+                    i = row + xx
+                    if d < cv.body_d[i]:
+                        cv.body_d[i] = d
+                        cv.body_u[i] = u
+                        cv.body_side[i] = (dx * nx + dy * ny) / r
+                        if dist > 0.001:
+                            facing = (dx / dist) * mdx + (dy / dist) * mdy
+                        else:
+                            facing = 0.6
+                        cv.body_light[i] = 0.35 + 0.65 * max(0.0, facing)
+                        cv.body_id[i] = self.kid
+            # Stamp a soft disc into this koi's glow grid.
+            gr = r * (GS / W) * 1.15
+            gx = x * (GS / W)
+            gy = y * (GS / W)
+            gx0 = max(0, int(gx - gr - 1))
+            gx1 = min(GS - 1, int(gx + gr + 1))
+            gy0 = max(0, int(gy - gr - 1))
+            gy1 = min(GS - 1, int(gy + gr + 1))
+            for yy in range(gy0, gy1 + 1):
+                ddy = yy - gy
+                grow = yy * GS
+                for xx in range(gx0, gx1 + 1):
+                    ddx = xx - gx
+                    gd = math.sqrt(ddx * ddx + ddy * ddy)
+                    if gd < gr:
+                        v = 0.9 * (1.0 - gd / gr)
+                        gi = grow + xx
+                        if v > glow[gi]:
+                            glow[gi] = v
+
+    def stamp_tail_fin(self, cv):
+        # Start a few samples up the tail so the fin's root tucks under
+        # the body (the body is composited over the fins) and the joint
+        # never pinches into a separate flame shape.
+        x, y, tx, ty, _t = self.samples[3]
+        back_x, back_y = -tx, -ty
+        nx, ny = -ty, tx
+        length = self.maxw * 2.7
+        steps = 44
+        pts = []
+        for i in range(steps + 1):
+            s = i / steps
+            bend = math.sin(s * math.pi * 0.9) * length * 0.10
+            px = x + back_x * length * s + nx * bend
+            py = y + back_y * length * s + ny * bend
+            pts.append((px, py, s))
+        for i, (px, py, s) in enumerate(pts):
+            if i == 0:
+                ftx, fty = pts[1][0] - px, pts[1][1] - py
+            elif i == steps:
+                ftx, fty = px - pts[i - 1][0], py - pts[i - 1][1]
+            else:
+                ftx, fty = pts[i + 1][0] - pts[i - 1][0], pts[i + 1][1] - pts[i - 1][1]
+            fl = math.hypot(ftx, fty) or 1.0
+            ftx /= fl
+            fty /= fl
+            fnx, fny = -fty, ftx
+            fw = self.maxw * 0.80 * (math.sin(math.pi * (0.16 + 0.76 * s)) ** 0.75)
+            if fw < 1.2:
+                continue
+            x0 = max(0, int(px - fw - 1))
+            x1 = min(W - 1, int(px + fw + 1))
+            y0 = max(0, int(py - fw - 1))
+            y1 = min(H - 1, int(py + fw + 1))
+            fw2 = fw * fw
+            for yy in range(y0, y1 + 1):
+                dy = yy - py
+                row = yy * W
+                for xx in range(x0, x1 + 1):
+                    dx = xx - px
+                    d2 = dx * dx + dy * dy
+                    if d2 > fw2:
+                        continue
+                    d = math.sqrt(d2) / fw
+                    a = (1.0 - d) ** 1.4 * 0.85
+                    i = row + xx
+                    if a > cv.fin_a[i]:
+                        cv.fin_a[i] = a
+                        cv.fin_u[i] = 1.25 + s * 0.6
+                        cv.fin_side[i] = (dx * fnx + dy * fny) / fw
+                        cv.fin_id[i] = self.kid
+
+    def stamp_pectoral_fins(self, cv):
+        anchor = self.sample_at_u(0.20)
+        x, y, tx, ty, _t = anchor
+        nx, ny = -ty, tx
+        r_here = width_profile(0.20) * self.maxw
+        for sign in (-1.0, 1.0):
+            cx = x + nx * sign * (r_here + self.maxw * 0.16) - tx * self.maxw * 0.10
+            cy = y + ny * sign * (r_here + self.maxw * 0.16) - ty * self.maxw * 0.10
+            ax = nx * sign * 0.88 - tx * 0.78
+            ay = ny * sign * 0.88 - ty * 0.78
+            al = math.hypot(ax, ay) or 1.0
+            ax /= al
+            ay /= al
+            px_, py_ = -ay, ax
+            a_len = self.maxw * 0.98
+            b_len = self.maxw * 0.40
+            rad = int(a_len + 2)
+            x0 = max(0, int(cx - rad))
+            x1 = min(W - 1, int(cx + rad))
+            y0 = max(0, int(cy - rad))
+            y1 = min(H - 1, int(cy + rad))
+            for yy in range(y0, y1 + 1):
+                dy = yy - cy
+                row = yy * W
+                for xx in range(x0, x1 + 1):
+                    dx = xx - cx
+                    uu = (dx * ax + dy * ay) / a_len
+                    vv = (dx * px_ + dy * py_) / b_len
+                    e = uu * uu + vv * vv
+                    if e >= 1.0:
+                        continue
+                    a = (1.0 - e) ** 1.3 * 0.85
+                    a *= 0.55 + 0.45 * smoothstep(-1.0, 0.3, uu)
+                    i = row + xx
+                    if a > cv.fin_a[i]:
+                        cv.fin_a[i] = a
+                        cv.fin_u[i] = uu * 0.5 + 0.5
+                        cv.fin_side[i] = vv
+                        cv.fin_id[i] = self.kid
+
+    def stamp_all(self, cv):
+        self.stamp_tail_fin(cv)
+        self.stamp_pectoral_fins(cv)
+        self.stamp_body(cv)
+
+
+KOI_BY_ID = {}
+
+
+def make_koi():
+    gold = Koi(1,
+               ((698.0, 806.0), (788.0, 584.0), (602.0, 382.0), (520.0, 238.0)),
+               60.0,
+               (0.80, 0.22, 0.03), (1.04, 0.43, 0.09), (1.32, 0.80, 0.31),
+               (1.07, 1.02, 0.95), (1.00, 0.74, 0.42), (1.05, 0.55, 0.20),
+               3.7, 9.1, 0.505, 0.585)
+    silver = Koi(2,
+                 ((332.0, 848.0), (228.0, 624.0), (414.0, 432.0), (452.0, 302.0)),
+                 52.0,
+                 (0.50, 0.60, 0.80), (0.86, 0.90, 1.00), (1.06, 1.07, 1.06),
+                 (1.06, 0.45, 0.10), (0.80, 0.90, 1.10), (0.55, 0.70, 1.05),
+                 17.3, 4.6, 0.565, 0.645)
+    KOI_BY_ID[1] = gold
+    KOI_BY_ID[2] = silver
+    return gold, silver
+
+
+def composite_koi(buf_r, buf_g, buf_b, cv):
+    """Blend glow, fins and bodies over the painted background."""
+    gscale = (GS - 1) / float(W)
+    for y in range(H):
+        fy = y * gscale
+        row = y * W
+        for x in range(W):
+            i = row + x
+            r = buf_r[i]
+            g = buf_g[i]
+            b = buf_b[i]
+
+            fx = x * gscale
+            ga = grid_sample(cv.glow[0], fx, fy)
+            if ga > 0.004:
+                gc = KOI_BY_ID[1].glow_col
+                r += gc[0] * ga * 0.50
+                g += gc[1] * ga * 0.50
+                b += gc[2] * ga * 0.50
+            gb = grid_sample(cv.glow[1], fx, fy)
+            if gb > 0.004:
+                gc = KOI_BY_ID[2].glow_col
+                r += gc[0] * gb * 0.42
+                g += gc[1] * gb * 0.42
+                b += gc[2] * gb * 0.42
+
+            fa = cv.fin_a[i]
+            if fa > 0.003:
+                koi = KOI_BY_ID[cv.fin_id[i]]
+                stripes = 0.78 + 0.30 * (0.5 + 0.5 * math.sin(
+                    cv.fin_side[i] * 15.0 + cv.fin_u[i] * 6.0))
+                fc = mix3(koi.mid, (1.10, 1.05, 0.95), 0.60)
+                a = fa * 0.80
+                r = r * (1.0 - a) + fc[0] * stripes * (a + a * 0.25)
+                g = g * (1.0 - a) + fc[1] * stripes * (a + a * 0.25)
+                b = b * (1.0 - a) + fc[2] * stripes * (a + a * 0.25)
+
+            kid = cv.body_id[i]
+            if kid:
+                koi = KOI_BY_ID[kid]
+                u = cv.body_u[i]
+                d = cv.body_d[i]
+                side = cv.body_side[i]
+                li = cv.body_light[i]
+                col = mix3(koi.deep, koi.mid, li)
+                col = mix3(col, koi.bright, smoothstep(0.62, 1.0, li) * 0.7)
+                n = fbm(u * 3.4 + koi.seed_a, side * 1.35 + koi.seed_b, 3)
+                p = smoothstep(koi.patch_lo, koi.patch_hi, n)
+                col = mix3(col, koi.patch, p)
+                n2 = fbm(u * 7.3 + koi.seed_b, side * 3.1 + koi.seed_a, 2)
+                p2 = smoothstep(0.56, 0.66, n2) * 0.45
+                col = mix3(col, koi.patch, p2 * (1.0 - p))
+                tex = 0.965 + 0.05 * math.sin(u * 170.0 - abs(side) * 2.0) * (1.0 - d * 0.5)
+                rim = smoothstep(0.78, 1.0, d) * (0.30 + 0.70 * li)
+                alpha = smoothstep(1.0, 0.90, d)
+                cr = col[0] * tex + koi.rim[0] * rim * 0.30
+                cg = col[1] * tex + koi.rim[1] * rim * 0.30
+                cb = col[2] * tex + koi.rim[2] * rim * 0.30
+                r = r + (cr - r) * alpha
+                g = g + (cg - g) * alpha
+                b = b + (cb - b) * alpha
+
+            buf_r[i] = r
+            buf_g[i] = g
+            buf_b[i] = b
+
+
+# --------------------------------------------------------------------------
+# Details painted over the composited scene: eyes, rising bubble trails,
+# a spiral stream of glowing motes spiralling up to the moon, sparkles.
+# --------------------------------------------------------------------------
+
+def paint_eyes(buf_r, buf_g, buf_b, koi):
+    anchor = koi.sample_at_u(0.055)
+    x, y, tx, ty, _t = anchor
+    nx, ny = -ty, tx
+    halfw = width_profile(0.055) * koi.maxw
+    eye_r = halfw * 0.17
+    mdx = MOON_X - x
+    mdy = MOON_Y - y
+    ml = math.hypot(mdx, mdy) or 1.0
+    mdx /= ml
+    mdy /= ml
+    for sign in (-1.0, 1.0):
+        cx = x + nx * sign * halfw * 0.52 + tx * halfw * 0.18
+        cy = y + ny * sign * halfw * 0.52 + ty * halfw * 0.18
+        rad = eye_r * 1.7
+        x0 = max(0, int(cx - rad))
+        x1 = min(W - 1, int(cx + rad))
+        y0 = max(0, int(cy - rad))
+        y1 = min(H - 1, int(cy + rad))
+        for yy in range(y0, y1 + 1):
+            dy = yy - cy
+            row = yy * W
+            for xx in range(x0, x1 + 1):
+                dx = xx - cx
+                q = math.sqrt(dx * dx + dy * dy)
+                if q > eye_r:
+                    continue
+                i = row + xx
+                f = smoothstep(eye_r, eye_r * 0.72, q)
+                buf_r[i] = buf_r[i] + (0.030 - buf_r[i]) * f
+                buf_g[i] = buf_g[i] + (0.030 - buf_g[i]) * f
+                buf_b[i] = buf_b[i] + (0.045 - buf_b[i]) * f
+                sx = xx - (cx + mdx * eye_r * 0.38)
+                sy = yy - (cy + mdy * eye_r * 0.38)
+                if sx * sx + sy * sy < (eye_r * 0.30) ** 2:
+                    buf_r[i] = 1.45
+                    buf_g[i] = 1.38
+                    buf_b[i] = 1.22
+
+
+def bubble_list(rng, gold, silver):
+    bubbles = []
+    for koi, phase in ((gold, 0.0), (silver, 2.4)):
+        tx, ty = koi.samples[0][0], koi.samples[0][1]
+        for i in range(40):
+            s = i / 40.0
+            bx = tx + math.sin(s * 5.1 + phase) * 26.0 * s + rng.uniform(-9.0, 9.0)
+            by = ty - s * (ty - 118.0) * rng.uniform(0.78, 1.0)
+            br = 1.6 + s * 6.5 + rng.uniform(0.0, 2.2)
+            bubbles.append((bx, by, br))
+    for _ in range(26):
+        bubbles.append((rng.uniform(60.0, 964.0), rng.uniform(300.0, 980.0),
+                        rng.uniform(1.5, 4.5)))
+    return bubbles
+
+
+def paint_bubbles(buf_r, buf_g, buf_b, bubbles):
+    for (bx, by, br) in bubbles:
+        rad = br * 1.3
+        x0 = max(0, int(bx - rad))
+        x1 = min(W - 1, int(bx + rad))
+        y0 = max(0, int(by - rad))
+        y1 = min(H - 1, int(by + rad))
+        mdx = MOON_X - bx
+        mdy = MOON_Y - by
+        ml = math.hypot(mdx, mdy) or 1.0
+        mdx /= ml
+        mdy /= ml
+        for yy in range(y0, y1 + 1):
+            dy = yy - by
+            row = yy * W
+            for xx in range(x0, x1 + 1):
+                dx = xx - bx
+                dist = math.sqrt(dx * dx + dy * dy)
+                q = dist / br
+                if q > 1.25:
+                    continue
+                ring = max(0.0, 1.0 - abs(q - 0.80) / 0.22) * 0.30
+                fill = 0.05 * (1.0 - q) if q < 1.0 else 0.0
+                spec = 0.0
+                if dist > 0.01 and q < 1.1:
+                    facing = (dx / dist) * mdx + (dy / dist) * mdy
+                    spec = max(0.0, facing) ** 7 * 0.85
+                add = (ring + fill + spec) * 0.8
+                i = row + xx
+                buf_r[i] += 0.72 * add
+                buf_g[i] += 0.84 * add
+                buf_b[i] += 1.05 * add
+
+
+def paint_motes(buf_r, buf_g, buf_b, rng):
+    """A spiral stream of glowing motes rising between the koi."""
+    for _ in range(300):
+        s = rng.random() ** 1.3
+        ang = 0.6 + s * 7.2
+        rad = 30.0 + (1.0 - s) * 330.0 * (0.75 + 0.25 * math.sin(s * 9.0))
+        cx = 512.0 + math.cos(ang) * rad * 0.82 + rng.uniform(-7.0, 7.0)
+        cy = 600.0 - s * 400.0 + math.sin(ang) * rad * 0.30 + rng.uniform(-16.0, 16.0)
+        size = 1.0 + (1.0 - s) * 1.8 + rng.random()
+        bright = 0.25 + 0.75 * rng.random()
+        if rng.random() < 0.5:
+            col = (1.20, 0.90, 0.50)
+        else:
+            col = (0.60, 0.95, 1.10)
+        reach = int(size * 3.0) + 1
+        x0 = max(0, int(cx - reach))
+        x1 = min(W - 1, int(cx + reach))
+        y0 = max(0, int(cy - reach))
+        y1 = min(H - 1, int(cy + reach))
+        for yy in range(y0, y1 + 1):
+            dy = yy - cy
+            row = yy * W
+            for xx in range(x0, x1 + 1):
+                dx = xx - cx
+                d2 = dx * dx + dy * dy
+                fall = bright / (1.0 + d2 / (size * size)) ** 2
+                i = row + xx
+                buf_r[i] += col[0] * fall * 0.42
+                buf_g[i] += col[1] * fall * 0.42
+                buf_b[i] += col[2] * fall * 0.42
+    # A few larger sparkles with cross flares.
+    for _ in range(26):
+        cx = rng.uniform(90.0, 934.0)
+        cy = rng.uniform(120.0, 900.0)
+        bright = rng.uniform(0.35, 0.8)
+        for off in range(-7, 8):
+            f = bright * max(0.0, 1.0 - abs(off) / 7.0) * 0.5
+            xi = int(cx) + off
+            yi = int(cy)
+            if 0 <= xi < W and 0 <= yi < H:
+                i = yi * W + xi
+                buf_r[i] += 0.85 * f
+                buf_g[i] += 0.92 * f
+                buf_b[i] += 1.05 * f
+            xi = int(cx)
+            yi = int(cy) + off
+            if 0 <= xi < W and 0 <= yi < H:
+                i = yi * W + xi
+                buf_r[i] += 0.85 * f
+                buf_g[i] += 0.92 * f
+                buf_b[i] += 1.05 * f
+        i = int(cy) * W + int(cx)
+        buf_r[i] += bright
+        buf_g[i] += bright
+        buf_b[i] += bright
+
+
+# --------------------------------------------------------------------------
+# Final pass: vignette, exponential tone map, quantise to bytes.
+# --------------------------------------------------------------------------
+
+def finish(buf_r, buf_g, buf_b):
+    rgb = bytearray(W * H * 3)
+    cx = W * 0.5
+    cy = H * 0.5
+    for y in range(H):
+        ny = (y - cy) / cy
+        row = y * W
+        for x in range(W):
+            nx = (x - cx) / cx
+            r2n = nx * nx + ny * ny
+            vig = 1.0 - 0.36 * smoothstep(0.30, 1.55, r2n)
+            i = row + x
+            o = i * 3
+            for ch, buf in ((0, buf_r), (1, buf_g), (2, buf_b)):
+                c = buf[i] * vig
+                t = 1.0 - math.exp(-c * 1.30)
+                q = int(t * 255.0 + 0.5)
+                if q < 0:
+                    q = 0
+                elif q > 255:
+                    q = 255
+                rgb[o + ch] = q
+    return rgb
+
+
+def render():
+    n = W * H
+    buf_r = array("f", [0.0]) * n
+    buf_g = array("f", [0.0]) * n
+    buf_b = array("f", [0.0]) * n
+
+    shimmer = make_shimmer_grid()
+    paint_background(buf_r, buf_g, buf_b, shimmer)
+
+    gold, silver = make_koi()
+    cv = Canvas()
+    silver.stamp_all(cv)
+    gold.stamp_all(cv)
+    blur_grid(cv.glow[0], 6)
+    blur_grid(cv.glow[1], 6)
+    composite_koi(buf_r, buf_g, buf_b, cv)
+
+    paint_eyes(buf_r, buf_g, buf_b, gold)
+    paint_eyes(buf_r, buf_g, buf_b, silver)
+
+    rng = Rng(20261116)
+    paint_bubbles(buf_r, buf_g, buf_b, bubble_list(rng, gold, silver))
+    paint_motes(buf_r, buf_g, buf_b, rng)
+
+    return finish(buf_r, buf_g, buf_b)
 
 
 def main():
-    out_dir = os.environ.get('MAKEFUN_OUTPUT_DIR', '/output')
-    os.makedirs(out_dir, exist_ok=True)
-    background()
-    vortex()
-    ring()
-    backlight(BX, BY)
-    shards(46, 4242, behind=True)
-    tail()
-    wing(-1, LUT_FEATHER_FAR, 0.88, 402.0, 38.0,
-         sec_len=0.68, prim_w=38.0)                 # far wing, filled in
-    wing(+1, LUT_FEATHER, 1.0, 450.0, 44.0)        # near wing
-    body_and_head()
-    shards(30, 9001, behind=False)
-    burst_at_gap()
-    embers_and_streaks()
-    post()
-    write_png(os.path.join(out_dir, 'entry.png'))
+    outdir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
+    os.makedirs(outdir, exist_ok=True)
+    rgb = render()
+    write_png(os.path.join(outdir, "entry.png"), W, H, rgb)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
