@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-"""ai-excited-01 entry: "Phoenix Ascendant".
+"""ai-excited-01 entry (v2 build): "Phoenix Ascendant".
 
-A pure-Python, standard-library-only program that draws one image and writes
-it to entry.png in the output directory (/output in the grader's container,
-or $MAKEFUN_OUTPUT_DIR when that is set, mirroring the kit starter).
+A pure-Python, standard-library-only program that paints one image and
+writes it to entry.png in the output directory (/output in the grader's
+container, or $MAKEFUN_OUTPUT_DIR when that variable is set).
 
-The image: a great firebird bursting upward through a shattered golden
-sun-ring, over a deep indigo storm-vortex. Wings raised in a V, tail
-streamers and embers streaming down the diagonal, shards of the broken ring
-flying toward the viewer. It is aimed at the judge's rubric in order:
-a jolt of energy (blazing bird against a dark vortex, white-hot chest core),
-surprise (a phoenix smashing out of a sun-ring, not a stock explosion),
-momentum (diagonal streams, bursting shards, swept feathers), craft (layered
-gradient feathers with rim light, deterministic value-noise nebula), and a
-silhouette that still reads at thumbnail size.
+The picture: a great firebird smashing upward through a shattered golden
+sun-ring, over a deep indigo storm-vortex. Wings thrown up in a V, a
+white-hot heart in its chest, tail streamers and ember trails raking down
+the diagonal, golden shards of the broken ring bursting toward the viewer.
+It is composed against the judge's rubric in order — excitement (a blazing
+bird detonating out of a dark vortex), surprise (a phoenix through a
+sun-ring, not a stock fireball), momentum (diagonal ember streams, speed
+streaks, swept feathers), craft (gradient feathers with rim light, an
+eroded per-pixel ring, deterministic value-noise nebula), and a silhouette
+that still reads when shrunk to a thumbnail.
 
-Everything is deterministic integer/float math from fixed constants: no time,
-no randomness beyond a fixed-seed LCG, no network, no files read. Two runs
-write byte-identical PNGs.
+Every value comes from fixed constants and integer/float math: no clock,
+no network, no file reads, no randomness beyond a fixed-seed LCG. Two
+runs produce a byte-identical PNG.
 """
 
 import math
@@ -30,12 +31,12 @@ W = 1024
 H = 1024
 
 # ---------------------------------------------------------------------------
-# Small deterministic helpers
+# Deterministic helpers
 # ---------------------------------------------------------------------------
 
 
 def ihash(x, y):
-    """Integer lattice hash -> float in [0, 1). Stable everywhere."""
+    """Integer lattice hash -> float in [0, 1). Stable on any platform."""
     h = (x * 374761393 + y * 668265263) & 0xFFFFFFFF
     h = (h ^ (h >> 13)) & 0xFFFFFFFF
     h = (h * 1274126177) & 0xFFFFFFFF
@@ -48,7 +49,7 @@ def smooth(t):
 
 
 def vnoise(x, y):
-    """Bilinear value noise at lattice scale 1 (callers scale coords)."""
+    """Value noise on a unit lattice; callers scale the coordinates."""
     xi = math.floor(x)
     yi = math.floor(y)
     xf = smooth(x - xi)
@@ -74,7 +75,7 @@ def fbm(x, y, octaves=4):
 
 
 class LCG:
-    """Fixed-seed linear congruential generator (deterministic)."""
+    """Fixed-seed linear congruential generator."""
 
     def __init__(self, seed):
         self.s = seed & 0xFFFFFFFF
@@ -88,7 +89,7 @@ class LCG:
 
 
 def make_lut(stops):
-    """stops: list of (pos0..1, (r,g,b)) -> 256-entry gradient LUT."""
+    """stops: [(pos0..1, (r, g, b)), ...] -> 256-entry gradient LUT."""
     lut = []
     for i in range(256):
         t = i / 255.0
@@ -109,56 +110,57 @@ def make_lut(stops):
 
 
 # Palettes -------------------------------------------------------------------
-LUT_FEATHER = make_lut([          # crimson -> scarlet -> orange -> gold
-    (0.00, (96, 8, 26)),
-    (0.35, (178, 24, 24)),
-    (0.65, (238, 84, 16)),
-    (0.88, (255, 156, 34)),
-    (1.00, (255, 208, 96)),
+# Feather tips run all the way to a pale-gold near-white so the wing edges
+# catch light against the dark vortex (thumbnail legibility).
+LUT_FEATHER = make_lut([          # crimson -> scarlet -> orange -> gold -> pale
+    (0.00, (100, 8, 26)),
+    (0.34, (186, 26, 22)),
+    (0.62, (242, 88, 14)),
+    (0.86, (255, 162, 32)),
+    (1.00, (255, 226, 146)),
 ])
-LUT_FEATHER_FAR = make_lut([      # the far wing, a touch cooler/darker
-    (0.00, (70, 8, 30)),
-    (0.40, (138, 20, 34)),
-    (0.75, (196, 52, 30)),
-    (1.00, (240, 130, 52)),
+LUT_FEATHER_FAR = make_lut([      # far wing: same family, deeper and cooler
+    (0.00, (74, 8, 32)),
+    (0.40, (144, 20, 34)),
+    (0.74, (204, 54, 28)),
+    (1.00, (246, 140, 56)),
 ])
 LUT_BODY = make_lut([             # tail crimson -> chest white-hot gold
-    (0.00, (140, 14, 26)),
-    (0.45, (216, 52, 18)),
-    (0.75, (252, 128, 26)),
-    (1.00, (255, 196, 84)),
+    (0.00, (146, 14, 26)),
+    (0.45, (220, 54, 18)),
+    (0.75, (253, 132, 26)),
+    (1.00, (255, 202, 90)),
 ])
-LUT_VORTEX = make_lut([           # storm disc: deep blue -> teal -> cyan
-    (0.00, (10, 16, 52)),
-    (0.35, (14, 52, 104)),
-    (0.62, (12, 104, 138)),
-    (0.85, (38, 178, 196)),
-    (1.00, (150, 236, 240)),
+LUT_VORTEX = make_lut([           # storm disc: deep ink -> teal -> cyan edge
+    (0.00, (9, 14, 50)),
+    (0.35, (13, 50, 104)),
+    (0.62, (11, 106, 142)),
+    (0.85, (36, 182, 200)),
+    (1.00, (158, 240, 244)),
 ])
-LUT_RING = make_lut([             # the sun-ring: deep gold -> white hot
-    (0.00, (146, 74, 10)),
-    (0.45, (232, 138, 22)),
-    (0.80, (255, 196, 74)),
-    (1.00, (255, 244, 196)),
+LUT_RING = make_lut([             # sun-ring: deep gold -> white hot
+    (0.00, (150, 76, 10)),
+    (0.45, (236, 142, 22)),
+    (0.80, (255, 200, 76)),
+    (1.00, (255, 248, 205)),
 ])
 LUT_SHARD = make_lut([
-    (0.00, (200, 110, 26)),
-    (0.60, (255, 186, 70)),
-    (1.00, (255, 240, 190)),
+    (0.00, (204, 112, 26)),
+    (0.60, (255, 190, 72)),
+    (1.00, (255, 244, 196)),
 ])
-LUT_SCALLOP = make_lut([          # body scales: bright lip -> deep shade
-    (0.00, (250, 150, 52)),
-    (0.55, (238, 100, 24)),
-    (1.00, (178, 40, 18)),
+LUT_SCALLOP = make_lut([          # belly scales: bright lip -> deep shade
+    (0.00, (252, 154, 54)),
+    (0.55, (240, 104, 24)),
+    (1.00, (182, 42, 18)),
 ])
 
 
 def noise_field(freq, ox, oy, octaves):
-    """fbm precomputed on a coarse lattice (cell 8 px), bilinearly sampled.
+    """fbm precomputed on a coarse lattice (8 px cells), bilinearly sampled.
 
-    The nebula and the vortex turbulence are low-frequency, so a lattice
-    field is visually identical to per-pixel fbm at a fraction of the cost.
-    Returns sample(x, y) -> float in [0, 1).
+    The nebula and vortex turbulence are low-frequency, so a lattice field
+    is visually identical to per-pixel fbm at a fraction of the cost.
     """
     cell = 8
     n = W // cell + 2
@@ -187,7 +189,7 @@ def noise_field(freq, ox, oy, octaves):
 
 
 FIELD_A = noise_field(5.0, 11.0, 3.0, 4)    # nebula body
-FIELD_B = noise_field(11.0, 40.0, 9.0, 3)   # nebula detail / vortex turb
+FIELD_B = noise_field(11.0, 40.0, 9.0, 3)   # nebula detail / vortex turbulence
 
 # ---------------------------------------------------------------------------
 # Canvas: three float planes
@@ -207,12 +209,12 @@ def background():
             nx = x / W
             n = FIELD_A(x, y)
             n2 = FIELD_B(x, y)
-            # diagonal falloff: darker toward lower-left, a glow upper-right
+            # darker toward the lower-left, a faint glow upper-right
             d = 0.72 + 0.28 * (nx * 0.6 + (1.0 - ny) * 0.4)
             r = (7.0 + 26.0 * n + 6.0 * n2) * d
             g = (5.0 + 14.0 * n + 10.0 * n2) * d
             b = (20.0 + 34.0 * n + 16.0 * n2) * d
-            # a breath of teal in the nebula's bright knots
+            # a breath of teal where the nebula knots brighten
             if n > 0.62:
                 k = (n - 0.62) * 1.4
                 g += 22.0 * k
@@ -222,7 +224,7 @@ def background():
             G[i] = g
             B[i] = b
     # stars: deterministic sparse points with a soft core
-    rng = LCG(20261115)
+    rng = LCG(20261116)
     for _ in range(420):
         x = rng.next() * W
         y = rng.next() * H
@@ -257,7 +259,7 @@ def stamp(cx, cy, radius, r, g, b, falloff=2.0):
 
 # ---------------------------------------------------------------------------
 # Polygon rasteriser with interpolated (u, v) attributes.
-# colour(u, v) -> (r, g, b, alpha, mode) with mode 'over' or 'add'.
+# colour(u, v) -> (r, g, b, alpha, mode); mode is 'over' or 'add'.
 # ---------------------------------------------------------------------------
 
 
@@ -328,7 +330,8 @@ def feather(p0, p1, p2, w_base, w_mid, lut, dark=1.0, segs=14):
     """One tapered feather along a quadratic bezier spine.
 
     u runs along the feather (0 base, 1 tip); v runs across (-1..1) and
-    shades the feather like a cylinder, with a bright rim on the +v edge.
+    shades it like a cylinder, with a bright rim on the +v edge and a
+    darker quill line down the middle.
     """
     left = []
     right = []
@@ -338,7 +341,7 @@ def feather(p0, p1, p2, w_base, w_mid, lut, dark=1.0, segs=14):
         tx, ty = bezier_tangent(p0, p1, p2, t)
         tl = math.hypot(tx, ty) or 1.0
         nx, ny = -ty / tl, tx / tl
-        # width profile: grows from base, widest ~40% along, gone at tip
+        # width profile: grows from the base, widest ~40% along, gone at tip
         w = (w_base * (1.0 - t) + w_mid * 4.0 * t * (1.0 - t)) * (1.0 - t * t * 0.92)
         left.append((cx + nx * w, cy + ny * w, t, -1.0))
         right.append((cx - nx * w, cy - ny * w, t, 1.0))
@@ -353,8 +356,7 @@ def feather(p0, p1, p2, w_base, w_mid, lut, dark=1.0, segs=14):
             r += 120.0 * f
             g += 84.0 * f
             b += 30.0 * f
-        # a darker quill line down the middle
-        if abs(v) < 0.10:
+        if abs(v) < 0.10:  # quill line
             f = 1.0 - abs(v) / 0.10
             r *= 1.0 - 0.30 * f
             g *= 1.0 - 0.30 * f
@@ -368,13 +370,13 @@ def feather(p0, p1, p2, w_base, w_mid, lut, dark=1.0, segs=14):
 # Scene pieces
 # ---------------------------------------------------------------------------
 
-CX, CY = 606.0, 388.0      # vortex / ring centre
-RING_R = 322.0             # ring mid radius
+CX, CY = 600.0, 400.0      # vortex / ring centre
+RING_R = 318.0             # ring mid radius
 
 
 def vortex():
     """A swirling storm disc behind the bird: log-spiral arms, teal on ink."""
-    rad = 356.0
+    rad = 352.0
     x0 = max(0, int(CX - rad))
     x1 = min(W - 1, int(CX + rad))
     y0 = max(0, int(CY - rad))
@@ -389,16 +391,17 @@ def vortex():
                 continue
             d = math.sqrt(d2)
             ang = math.atan2(dy, dx)
-            # arms fade out toward the centre so they dissolve into a dark
-            # core instead of pinching to a bright point
+            # arms fade toward the centre so they dissolve into a dark core.
+            # The arm contrast is deliberately hard: with soft arms the disc
+            # shades like a glossy ball; hard lanes read as a storm.
             arm = 0.30 + 0.70 * smooth(min(1.0, d / (rad * 0.55)))
             swirl = 0.5 + 0.5 * math.sin(ang * 3.0 + d * 0.011
                                          + 1.8 * math.sin(ang * 2.0 - d * 0.005))
-            turb = FIELD_B(x * 0.7 + 130.0, y * 0.7 + 60.0)
-            t = max(0.0, min(1.0, (0.5 + (swirl - 0.5) * arm) * 0.55
-                             + turb * 0.55 - d / rad * 0.16))
+            turb = FIELD_B(x * 1.15 + 130.0, y * 1.15 + 60.0)
+            t = max(0.0, min(1.0, (0.5 + (swirl - 0.5) * 1.30 * arm) * 0.62
+                             + turb * 0.48 - d / rad * 0.10))
             if d < rad * 0.20:
-                t *= 0.45 + 0.55 * (d / (rad * 0.20))
+                t *= 0.55 + 0.45 * (d / (rad * 0.20))
             cr, cg, cb = LUT_VORTEX[int(t * 255)]
             edge = 1.0 - smooth((d - rad * 0.86) / (rad * 0.14)) if d > rad * 0.86 else 1.0
             a = 0.92 * edge
@@ -412,13 +415,13 @@ def vortex():
 
 
 def ring():
-    """The shattered sun-ring, drawn per pixel so its light stays smooth.
+    """The shattered sun-ring, painted per pixel so its light stays smooth.
 
     A golden annulus around the vortex: white-hot along its centre line,
-    eroded by angular noise so the edges crumble, with two broken sectors —
-    a wide one at the lower left (where the bird burst through) and a
-    narrower one at the upper right (where it is heading). Inside the gaps
-    only high-noise teeth of gold remain. A faint halo hugs the inner edge.
+    its edges crumbled by angular noise, with two broken sectors — a wide
+    one at the lower left (where the bird burst through) and a narrower
+    one at the upper right (where it is heading). Inside the gaps only
+    high-noise teeth of gold survive. A faint halo hugs the inner edge.
     Angles are degrees in image space: 0 right, 90 down, 180 left, -90 up.
     """
     rad = RING_R * 1.32
@@ -426,7 +429,7 @@ def ring():
     x1 = min(W - 1, int(CX + rad))
     y0 = max(0, int(CY - rad))
     y1 = min(H - 1, int(CY + rad))
-    gaps = [(116.0, 154.0), (-47.0, -7.0)]
+    gaps = [(104.0, 146.0), (-78.0, -38.0)]
     for y in range(y0, y1 + 1):
         dy = y - CY
         row = y * W
@@ -444,18 +447,20 @@ def ring():
             ero = vnoise(3.1 + 1.9 * math.cos(math.radians(ang)),
                          5.7 + 1.9 * math.sin(math.radians(ang)))
             brush = vnoise(d * 0.045, 8.8)
-            half = 21.0 + 23.0 * ero
+            # wide width swing: the ring swells and pinches like broken
+            # rock instead of running at one smooth pipe diameter
+            half = 16.0 + 28.0 * ero
             i = row + x
             in_gap = any(g0 <= ang <= g1 for (g0, g1) in gaps)
             if abs(off) <= half + 8.0:
-                heat = max(0.0, 1.0 - abs(off) / half)
+                heat = max(0.0, 1.0 - abs(off) / half) ** 1.25
                 cover = min(1.0, (half + 4.0 - abs(off)) / 8.0)
                 if in_gap:
                     # only crumbled teeth survive inside a broken sector
                     cover *= max(0.0, (ero - 0.60) * 2.4) * max(
                         0.0, (brush - 0.34) * 2.0)
                 if cover > 0.01:
-                    flick = 0.88 + 0.22 * brush
+                    flick = 0.82 + 0.34 * brush
                     cr, cg, cb = LUT_RING[int((0.30 + 0.70 * heat) * 255)]
                     a = 0.97 * cover
                     ia = 1.0 - a
@@ -469,14 +474,25 @@ def ring():
                     R[i] += 34.0 * f * f
                     G[i] += 15.0 * f * f
                     B[i] += 2.0 * f * f
-    # soft glow pooled at the ring's unbroken top and left (not on the gap)
-    stamp(CX + 30, CY - 305, 150.0, 40.0, 19.0, 2.0)
-    stamp(CX - 268, CY - 60, 140.0, 36.0, 16.0, 2.0)
+    # soft glow pooled at the ring's unbroken top and left (not in a gap)
+    stamp(CX + 30, CY - 300, 150.0, 40.0, 19.0, 2.0)
+    stamp(CX - 262, CY - 60, 140.0, 36.0, 16.0, 2.0)
+
+
+def backlight(bx, by):
+    """A warm bloom behind the bird, laid down before the bird is drawn.
+
+    The vortex behind the body is mid-teal; this halo of hot amber light
+    separates the crimson silhouette from it, so the bird still pops when
+    the picture is shrunk to thumbnail size.
+    """
+    stamp(bx, by - 40.0, 330.0, 46.0, 20.0, 3.0, falloff=1.6)
+    stamp(bx, by - 60.0, 190.0, 66.0, 30.0, 4.0, falloff=1.8)
 
 
 # Bird geometry lives in a local frame, then rotates about the body centre.
-BX, BY = 496.0, 522.0
-ROT = math.radians(-15.0)
+BX, BY = 514.0, 514.0
+ROT = math.radians(-18.0)
 COSR, SINR = math.cos(ROT), math.sin(ROT)
 
 
@@ -556,7 +572,7 @@ def body_and_head():
         spine.append((x, y, t))
     left, right = [], []
     for (x, y, t) in spine:
-        hw = 56.0 * math.sin(math.pi * min(1.0, 0.12 + t * 0.98)) ** 0.8
+        hw = 58.0 * math.sin(math.pi * min(1.0, 0.12 + t * 0.98)) ** 0.8
         hw *= (1.0 - 0.25 * t)
         left.append((*xf(x - hw, y), t, -1.0))
         right.append((*xf(x + hw, y), t, 1.0))
@@ -575,7 +591,7 @@ def body_and_head():
         t = 0.40 + row_i * 0.072
         sx = 14.0 * math.sin(t * math.pi * 0.9) - 4.0 * t
         sy = -150.0 + 318.0 * t
-        hw = 56.0 * math.sin(math.pi * min(1.0, 0.12 + t * 0.98)) ** 0.8
+        hw = 58.0 * math.sin(math.pi * min(1.0, 0.12 + t * 0.98)) ** 0.8
         hw *= (1.0 - 0.25 * t)
         shift = 7.0 if row_i % 2 else 0.0
         for fx in (-0.60, 0.0, 0.60):
@@ -597,7 +613,7 @@ def body_and_head():
 
     # head: a squashed oval, crimson crown shading to a gold face
     hx, hy = xf(10.0, -164.0)
-    head_r = 34.0
+    head_r = 36.0
     pts = []
     for s in range(20):
         a = s / 20.0 * math.tau
@@ -613,7 +629,7 @@ def body_and_head():
 
     fill_poly(pts, hcolour)
     # beak: two gold wedges pointing up-right, the direction of flight
-    pts = [(*xf(28.0, -180.0), 0, 0), (*xf(88.0, -194.0), 1, 0),
+    pts = [(*xf(28.0, -180.0), 0, 0), (*xf(90.0, -195.0), 1, 0),
            (*xf(32.0, -162.0), 0, 1)]
 
     def bcolour(u, v):
@@ -623,7 +639,7 @@ def body_and_head():
         return (cr, cg, cb, 1.0, 'over')
 
     fill_poly(pts, bcolour)
-    pts = [(*xf(30.0, -160.0), 0, 0), (*xf(66.0, -168.0), 1, 0),
+    pts = [(*xf(30.0, -160.0), 0, 0), (*xf(68.0, -168.0), 1, 0),
            (*xf(32.0, -148.0), 0, 1)]
 
     def bcolour2(u, v):
@@ -654,17 +670,36 @@ def body_and_head():
     stamp(ex - 2.0, ey - 2.0, 3.4, 160.0, 150.0, 120.0)
 
 
+def _shard_poly(cx, cy, size, rot, stretch):
+    pts = []
+    for (lx, ly) in [(-1.0, 0.0), (0.2, -0.42), (1.0, 0.05), (0.1, 0.46)]:
+        rx = lx * size * stretch
+        ry = ly * size
+        pts.append((cx + rx * math.cos(rot) - ry * math.sin(rot),
+                    cy + rx * math.sin(rot) + ry * math.cos(rot),
+                    (lx + 1.0) / 2.0, ly + 0.5))
+    return pts
+
+
+def _shard_colour(bright):
+    def colour(u, v):
+        cr, cg, cb = LUT_SHARD[int(max(0, min(255, u * 255)))]
+        sh = (0.60 + 0.58 * v) * bright
+        return (cr * sh, cg * sh, cb * sh, 0.96, 'over')
+
+    return colour
+
+
 def shards(count, seed, behind):
     """Polygons of the broken ring bursting outward toward the viewer.
 
     Shards fly along radial lines from the ring centre; the ones marked
-    'behind' are drawn before the bird, the rest after (some cross the
-    bird's silhouette, which sells the burst-through moment).
+    'behind' are drawn before the bird, the rest after — some crossing
+    the bird's silhouette, which sells the burst-through moment.
     """
     rng = LCG(seed)
     for _ in range(count):
         ang = rng.next() * math.tau
-        # bias the burst toward the ring's broken lower-left and the right
         dist = RING_R * (0.82 + 0.75 * rng.next() ** 1.6)
         cx = CX + math.cos(ang) * dist
         cy = CY + math.sin(ang) * dist
@@ -676,21 +711,8 @@ def shards(count, seed, behind):
             continue   # keep the body's own silhouette clean of stray fins
         rot = ang + rng.range(-0.5, 0.5)
         stretch = rng.range(1.4, 3.0)
-        pts = []
-        for (lx, ly) in [(-1.0, 0.0), (0.2, -0.42), (1.0, 0.05), (0.1, 0.46)]:
-            rx = lx * size * stretch
-            ry = ly * size
-            pts.append((cx + rx * math.cos(rot) - ry * math.sin(rot),
-                        cy + rx * math.sin(rot) + ry * math.cos(rot),
-                        (lx + 1.0) / 2.0, ly + 0.5))
-        bright = rng.range(0.55, 1.0)
-
-        def colour(u, v, _b=bright):
-            cr, cg, cb = LUT_SHARD[int(max(0, min(255, u * 255)))]
-            sh = (0.60 + 0.58 * v) * _b
-            return (cr * sh, cg * sh, cb * sh, 0.96, 'over')
-
-        fill_poly(pts, colour)
+        fill_poly(_shard_poly(cx, cy, size, rot, stretch),
+                  _shard_colour(rng.range(0.55, 1.0)))
         if not behind and rng.next() < 0.5:
             stamp(cx, cy, size * 0.9, 30.0, 16.0, 2.0)
 
@@ -698,58 +720,74 @@ def shards(count, seed, behind):
 def burst_at_gap():
     """The burst point: a flash and a fan of shards at the ring's broken
     upper-right sector, where the bird is breaking out toward the viewer."""
-    gx = CX + math.cos(math.radians(-27.0)) * RING_R
-    gy = CY + math.sin(math.radians(-27.0)) * RING_R
+    gx = CX + math.cos(math.radians(-58.0)) * RING_R
+    gy = CY + math.sin(math.radians(-58.0)) * RING_R
     stamp(gx, gy, 95.0, 120.0, 58.0, 8.0)
     stamp(gx, gy, 34.0, 210.0, 150.0, 70.0)
     rng = LCG(31337)
     for _ in range(13):
-        ang = math.radians(-27.0) + rng.range(-0.55, 0.55)
+        ang = math.radians(-58.0) + rng.range(-0.55, 0.55)
         dist = RING_R * rng.range(0.92, 1.38)
         cx = CX + math.cos(ang) * dist
         cy = CY + math.sin(ang) * dist
         size = rng.range(9.0, 30.0)
         rot = ang + rng.range(-0.4, 0.4)
         stretch = rng.range(1.6, 3.2)
-        pts = []
-        for (lx, ly) in [(-1.0, 0.0), (0.2, -0.42), (1.0, 0.05), (0.1, 0.46)]:
-            rx = lx * size * stretch
-            ry = ly * size
-            pts.append((cx + rx * math.cos(rot) - ry * math.sin(rot),
-                        cy + rx * math.sin(rot) + ry * math.cos(rot),
-                        (lx + 1.0) / 2.0, ly + 0.5))
-        bright = rng.range(0.75, 1.05)
-
-        def colour(u, v, _b=bright):
-            cr, cg, cb = LUT_SHARD[int(max(0, min(255, u * 255)))]
-            sh = (0.60 + 0.58 * v) * _b
-            return (cr * sh, cg * sh, cb * sh, 0.97, 'over')
-
-        fill_poly(pts, colour)
+        fill_poly(_shard_poly(cx, cy, size, rot, stretch),
+                  _shard_colour(rng.range(0.75, 1.05)))
 
 
 def embers_and_streaks():
-    """Additive light: ember streams on the diagonal, radiating streaks."""
-    rng = LCG(777001)
+    """Additive light: ember streams on the diagonal, motion streaks
+    trailing the embers, and speed lines radiating from the ring centre."""
+    rng = LCG(777002)
     # ember stream A: trailing off down-left with the tail
     for _ in range(300):
         t = rng.next()
-        cx = 452.0 - 420.0 * t + rng.range(-46, 46)
-        cy = 690.0 + 300.0 * t + rng.range(-40, 40)
+        cx = 456.0 - 420.0 * t + rng.range(-46, 46)
+        cy = 698.0 + 300.0 * t + rng.range(-40, 40)
         s = rng.range(1.2, 4.6) * (1.0 - t * 0.5)
         hot = rng.range(0.4, 1.0)
         stamp(cx, cy, s * 2.4, 200.0 * hot, 92.0 * hot, 14.0 * hot)
     # ember stream B: bursting up-right past the ring
     for _ in range(260):
         t = rng.next()
-        cx = 640.0 + 360.0 * t + rng.range(-52, 52)
-        cy = 330.0 - 260.0 * t + rng.range(-46, 46)
+        cx = 644.0 + 360.0 * t + rng.range(-52, 52)
+        cy = 338.0 - 260.0 * t + rng.range(-46, 46)
         s = rng.range(1.2, 5.0) * (1.0 - t * 0.4)
         hot = rng.range(0.4, 1.0)
         if rng.next() < 0.22:  # a few cool sparks for contrast
             stamp(cx, cy, s * 2.2, 30.0 * hot, 130.0 * hot, 140.0 * hot)
         else:
             stamp(cx, cy, s * 2.4, 210.0 * hot, 110.0 * hot, 20.0 * hot)
+    # motion streaks: thin additive blades along the flight diagonal
+    # (down-left trailing the tail, up-right leading the burst). Round
+    # embers alone read as static sparks; blades sell the velocity.
+    diag = math.radians(35.0)
+    dxu, dyu = math.cos(diag), -math.sin(diag)     # up-right unit vector
+    pxu, pyu = -dyu, dxu                           # perpendicular
+    for _ in range(46):
+        t = rng.next()
+        if t < 0.55:   # trailing blade, behind/below the bird
+            cx = 470.0 - 430.0 * rng.next() + rng.range(-30, 30)
+            cy = 700.0 + 260.0 * rng.next() + rng.range(-26, 26)
+        else:          # leading blade, up-right of the burst
+            cx = 660.0 + 330.0 * rng.next() + rng.range(-30, 30)
+            cy = 320.0 - 240.0 * rng.next() + rng.range(-26, 26)
+        ln = rng.range(30.0, 95.0)
+        wd = rng.range(1.0, 2.6)
+        glow = rng.range(0.10, 0.30)
+        pts = [(cx - dxu * ln - pxu * wd, cy - dyu * ln - pyu * wd, 0, 0),
+               (cx + dxu * ln * 0.3 - pxu * wd * 0.3,
+                cy + dyu * ln * 0.3 - pyu * wd * 0.3, 1, 0),
+               (cx + dxu * ln * 0.3 + pxu * wd * 0.3,
+                cy + dyu * ln * 0.3 + pyu * wd * 0.3, 1, 1),
+               (cx - dxu * ln + pxu * wd, cy - dyu * ln + pyu * wd, 0, 1)]
+
+        def colour(u, v, _g=glow):
+            return (255.0, 176.0, 84.0, _g * (1.0 - u), 'add')
+
+        fill_poly(pts, colour)
     # speed streaks radiating from the ring centre
     for _ in range(70):
         ang = rng.next() * math.tau
@@ -765,18 +803,18 @@ def embers_and_streaks():
                (cx + dx * ln + px * wd * 0.3, cy + dy * ln + py * wd * 0.3, 1, 1),
                (cx - dx * ln * 0.4 + px * wd, cy - dy * ln * 0.4 + py * wd, 0, 1)]
 
-        def colour(u, v):
+        def colour2(u, v):
             return (255.0, 190.0, 90.0, 0.16 * (1.0 - u), 'add')
 
-        fill_poly(pts, colour)
+        fill_poly(pts, colour2)
 
 
 def post():
-    """Vignette, a gentle S-curve, and the white-hot chest core on top."""
-    cx, cy = BX, BY - 60.0
+    """The white-hot chest core on top, then a vignette to frame it."""
     # the chest core: a broad warm bloom and a white-hot heart on top
     stamp(*xf(0.0, -34.0), 130.0, 168.0, 74.0, 10.0)
     stamp(*xf(0.0, -34.0), 30.0, 255.0, 214.0, 130.0)
+    cx, cy = BX, BY - 60.0
     maxd2 = (W * 0.72) ** 2
     for y in range(H):
         dy = y - cy
@@ -789,17 +827,16 @@ def post():
             R[i] *= f
             G[i] *= f
             B[i] *= f
-    # S-curve LUT applied at PNG build time (see tone_lut)
-    return
 
 
+# Gentle S-curve with a slight lift, applied when quantising to bytes.
 TONE = [min(255, max(0, int(255.0 * ((v / 255.0) ** 1.06
         + 0.10 * math.sin((v / 255.0) * math.pi) * (v / 255.0) * (1 - v / 255.0)
         )))) for v in range(256)]
 
 
 # ---------------------------------------------------------------------------
-# PNG writer (filter Sub, zlib). Pure stdlib.
+# PNG writer (filter Sub, zlib level 9). Pure stdlib.
 # ---------------------------------------------------------------------------
 
 
@@ -842,11 +879,12 @@ def main():
     background()
     vortex()
     ring()
+    backlight(BX, BY)
     shards(46, 4242, behind=True)
     tail()
-    wing(-1, LUT_FEATHER_FAR, 0.88, 415.0, 30.0,
+    wing(-1, LUT_FEATHER_FAR, 0.88, 402.0, 38.0,
          sec_len=0.68, prim_w=38.0)                 # far wing, filled in
-    wing(+1, LUT_FEATHER, 1.0, 445.0, 44.0)        # near wing
+    wing(+1, LUT_FEATHER, 1.0, 450.0, 44.0)        # near wing
     body_and_head()
     shards(30, 9001, behind=False)
     burst_at_gap()
